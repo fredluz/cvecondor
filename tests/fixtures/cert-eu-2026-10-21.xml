@@ -1,0 +1,33 @@
+<rss version="2.0">
+    <channel>
+        <title>Latest publications of type Security Advisories</title>
+        <link>https://cert.europa.eu/publications/security-advisories/</link>
+        <description>RSS feed for the latest 10 publications of type Security Advisories.</description>
+        <ttl>1440</ttl>
+        <language>en-gb</language>
+        <item>
+            <title>2026-018: Critical Vulnerabilities in PHP</title>
+            <link>
+                https://cert.europa.eu/publications/security-advisories/2026-018/
+            </link>
+            <description>On 20 October 2026, the PHP project announced an upcoming security release addressing two critical vulnerabilities in PHP. Public reports indicated that these vulnerabilities could lead to remote code execution.&lt;br&gt;
+The PHP team released the fixes today, 21 October 2026 at 13:30 UTC, in PHP versions 8.5.12, 8.4.27, 8.3.36 and 8.2.35. Both vulnerabilities can allow unauthenticated remote code execution. Technical details are now being discussed publicly, and initial proofs of concept (PoCs) have begun to circulate. This raises the likelihood that attackers are already exploiting the vulnerabilities.&lt;br&gt;
+CERT-EU advises organisations to patch affected assets immediately. Where that is not feasible, organisations should consider isolating internet-facing applications from public networks until a fix is applied and verified.&lt;br&gt;
+</description>
+            <pubDate>Wed, 21 Oct 2026 17:20:18 CEST</pubDate>
+            <guid>security-advisories-10955</guid>
+        </item>
+<item>
+            <title>2026-017: Critical Vulnerability in Cisco Secure Email Gateway</title>
+            <link>
+                https://cert.europa.eu/publications/security-advisories/2026-017/
+            </link>
+            <description>On 14 October 2026, Cisco published a security advisory addressing a critical vulnerability affecting the Advanced Malware Protection (AMP) feature of Cisco Secure Email Gateway. This vulnerability could allow an unauthenticated, remote attacker to write arbitrary files and execute commands with root privileges on the underlying operating system.&lt;br&gt;
+The Cisco PSIRT is aware of active exploitation of this vulnerability.&lt;br&gt;
+CERT-EU strongly recommends updating the Content Scanner Tools package or upgrading Cisco AsyncOS Software to a fixed release as soon as possible, prioritising appliances reachable from the internet. CERT-EU also recommends checking all affected appliances for indicators of compromise.&lt;br&gt;
+</description>
+            <pubDate>Thu, 15 Oct 2026 11:38:20 CEST</pubDate>
+            <guid>security-advisories-10954</guid>
+        </item>
+</channel>
+</rss>

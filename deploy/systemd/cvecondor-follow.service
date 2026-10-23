@@ -1,0 +1,24 @@
+# ~/.config/systemd/user/cvecondor-follow.service: `cvecondor follow` on the Linux machine you sit at.
+# It reads the watcher's new urgent lines (wherever the watcher runs) and starts a session of your agent for each.
+# A user unit, not a system one: it starts your agent and your terminal as you. Settings are in
+# ~/.config/cvecondor/follow.json (examples/follow.example.jsonc).
+#   install -D -m 0644 cvecondor-follow.service ~/.config/systemd/user/cvecondor-follow.service
+#   systemctl --user daemon-reload && systemctl --user enable --now cvecondor-follow
+#   loginctl enable-linger $USER        (keeps it running when you are logged out; skip on a desktop you always log in to)
+# Opening a terminal window needs your graphical session's DISPLAY or WAYLAND_DISPLAY: run
+#   systemctl --user import-environment DISPLAY WAYLAND_DISPLAY XAUTHORITY DBUS_SESSION_BUS_ADDRESS
+# once per login (or set "terminal" in follow.json to a command that does not need it). Check: cvecondor follow --test
+[Unit]
+Description=CVECondor follow: urgent lines into your agent's session
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=%h/.local/bin/cvecondor follow
+# tmux, ssh and your agent CLI must be found: add the directories `which tmux <your agent>` print.
+Environment=PATH=%h/.local/bin:%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=default.target

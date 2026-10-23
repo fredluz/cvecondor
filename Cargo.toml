@@ -1,0 +1,39 @@
+[package]
+name = "cvecondor"
+version = "0.1.0"
+edition = "2024"
+description = "Watches public vulnerability feeds, matches them against what you actually run, and hands each likely hit to your own agent CLI."
+license = "Apache-2.0"
+authors = ["The CVECondor Authors"]
+repository = "https://github.com/fredluz/cvecondor"
+homepage = "https://github.com/fredluz/cvecondor"
+rust-version = "1.88"
+keywords = ["security", "vulnerability", "cve", "osv", "monitoring"]
+categories = ["command-line-utilities"]
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "cvecondor"
+path = "src/main.rs"
+
+[dependencies]
+ureq = { version = "3.5", default-features = false, features = ["rustls"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+webpki-roots = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+indexmap = { version = "2", features = ["serde"] }
+regex = "1"
+jiff = { version = "0.2", features = ["tzdb-bundle-always"] }
+sha2 = "0.11"
+lexopt = "0.3"
+anyhow = "1"
+libc = "0.2"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+opt-level = "s"

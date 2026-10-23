@@ -1,0 +1,11 @@
+target/
+dist/
+# A config made inside a checkout stays out of git: env files hold secrets, the rest describes the user's setup.
+*.env
+.env
+.env.*
+config.json
+config.jsonc
+rotation-map.json
+deployment.md
+runbooks/

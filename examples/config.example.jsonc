@@ -1,0 +1,94 @@
+// CVECondor config. JSON with comments. Secrets are ${ENV_VAR} references, never literal values:
+// put the values in an env file only the watcher can read (chmod 600). Only "collectors" is required.
+{
+  // State (feeds seen, cases, inventory, reports). Default ~/.local/state/cvecondor; CVECONDOR_STATE_DIR wins.
+  "stateDir": "~/.local/state/cvecondor",
+  "pollMinutes": 5,          // feeds are conditional requests: an unchanged feed costs one 304
+  "inventoryHours": 1,       // cheap: unchanged repos cost nothing beyond the repo list
+  // "timezone": "UTC",       // report dates; default: the TZ environment variable, else the system's
+
+  // What you run. Every collector reads only; its credentials are never given to the responder.
+  "collectors": [
+    // Your GitHub repos: lockfiles, manifests, Dockerfile/compose base images, version files, deploy configs,
+    // committed .env files and credential-prone config files (scanned with gitleaks), Actions secret NAMES.
+    // Token: fine-grained, Repository access = the repos to watch. The watcher only reads with it; its permissions
+    // depend on the shape you pick (README, "The GitHub token"): read-only (Contents: read, Metadata: read) when the
+    // responder has its own login, or Contents and Pull requests: read and write when the responder uses this same
+    // token to open fix PRs ("responder.env" below). Optional either way: Secrets: read for Actions secret names,
+    // Deployments: read for deploy platforms.
+    { "type": "github", "token": "${GITHUB_TOKEN}", "repos": ["your-user/*", "your-org/api"], "exclude": ["your-user/old-*"] },
+
+    // The server the watcher runs on (from a container: mount / read-only at /host and set "root": "/host").
+    // Packages from dpkg/apk databases, runtimes, compose and .env files (secrets scanned, names only).
+    // { "type": "host", "root": "/" },
+
+    // Its containers through the Docker API: GET requests only (archive reads, inspect, logs).
+    // Point it at a socket proxy with POST=0 (see deploy/docker-compose.yml) for a read-only guarantee.
+    // { "type": "docker", "endpoint": "unix:///var/run/docker.sock" },
+
+    // A server elsewhere, over SSH with a key used only for this: host packages, containers (docker inspect/cp,
+    // never exec), compose and .env files. "sudo": true uses `sudo -n` for the reads that need it.
+    // { "type": "ssh", "name": "web1", "host": "watcher@203.0.113.7", "identityFile": "~/.ssh/cvecondor_ro", "sudo": true }
+  ],
+
+  // Repos, containers or hostnames (globs) that serve your customers: they lead every case and message.
+  "priority": ["your-org/api", "app.example.com"],
+
+  // Optional. classifier.dev with your own key judges prose advisories and vendor news. Without a key,
+  // plain name matching decides (more noise, nothing missed). Also read from CLASSIFIER_API_KEY.
+  "classifier": { "apiKey": "${CLASSIFIER_API_KEY}" },
+
+  // Vendors are detected from your repos and servers (env var names, config files, SDKs, deployments).
+  // Add the ones used outside code, with your own feeds if the catalogue has none.
+  "vendors": ["google-workspace", "1password", { "id": "acme-pay", "name": "Acme Pay", "feeds": [{ "url": "https://status.acmepay.example/history.rss", "kind": "status" }] }],
+  "ignoreVendors": [],
+  "news": true,              // Hacker News, BleepingComputer, The Hacker News, SecurityWeek, Krebs: matched to your vendors when a headline names one
+  // Sources not to poll, by id (feeds.json in the state dir lists them): "cve-list" (the CVE List), "cisa-kev", "cert-eu", "osv:npm", "news:krebs", …
+  "disabledSources": [],
+
+  // Written at setup by your agent (agent/setup.md): where each key is stored, and per-service runbooks.
+  "rotationMap": "~/.config/cvecondor/rotation-map.json",
+  "runbooks": "~/.config/cvecondor/runbooks",
+
+  // Optional. Your own agent CLI, logged in with your own subscription (no API key here). Any CLI works:
+  // "command" is its argv, either one array for every mode or { "propose": [...], "update": [...], "act": [...] }
+  // (a mode you leave out uses act, then update, then propose). Placeholders, replaced anywhere inside an argument:
+  //   {prompt}   path of the full prompt file (when no argument has it, the prompt goes on stdin)
+  //   {brief}    path of the standing brief (copied into the work dir as brief.md)
+  //   {case}     the case file          {report}   where to write the report
+  //   {workdir}  the scratch directory  {mode}     propose | update | act
+  "responder": {
+    // Your CLI's headless form (it takes a prompt, works, exits). Most read the prompt on stdin; add {prompt} only
+    // where yours takes a file argument (e.g. "@{prompt}" for CLIs that read @file).
+    "command": ["your-agent-cli", "<its headless flags>"],
+    // Shorthand instead of "command": "agent": "claude" | "codex" | "omp" (presets, with per-mode flags).
+    // A fixed release exists → it updates (batched per host and repo, PRs with your git login), checks the
+    // service, tells you. On by default; list services that should only get a proposal.
+    "updateWhenFixed": true,
+    "updateExcept": ["billing.example.com"],
+    // No fix yet and exploitable here → work around it (guard, disable, block, pin; last-resort restorable
+    // stop) only on these services. Everywhere else: exact steps proposed, none run.
+    "actOn": ["your-org/api"],
+    "notes": "Staging is app-staging.example.com. Never touch the billing database. Act on web1 with `ssh web1-act`; privileged commands as `sudo -n` (agent/setup.md, \"Acting on the server\").",
+    "maxPerCycle": 2,
+    "timeoutMinutes": 60,
+    // The responder's environment never inherits the watcher's secrets; pass what it needs to act, by name.
+    // One token for both (simplest): a fine-grained token with Contents and Pull requests write, which the
+    // watcher only reads with and the responder uses as its gh/git login. For stricter separation, give the
+    // watcher a read-only token and the responder its own login instead (see agent/setup.md).
+    "env": { "GH_TOKEN": "${GITHUB_TOKEN}" }
+    // In a container, the claude login: "CLAUDE_CODE_OAUTH_TOKEN": "${CLAUDE_CODE_OAUTH_TOKEN}" (from `claude setup-token`).
+  },
+
+  // Where urgent things reach you: one short line, only when something is exploitable now or a workaround or stop is
+  // under way (events: ["urgent"], the default). Everything else is kept under reports/ and in the inbox, which your
+  // agent reads (`cvecondor inbox`). A channel your agent reads can also get "case" (cycle summaries), "report"
+  // (responder results) and "secrets".
+  "notify": [
+    { "type": "telegram", "botToken": "${TELEGRAM_BOT_TOKEN}", "chatId": "123456789" }
+    // { "type": "slack", "webhookUrl": "${SLACK_WEBHOOK_URL}" },
+    // { "type": "email", "host": "smtp.example.com", "port": 587, "user": "alerts@example.com", "pass": "${SMTP_PASSWORD}", "from": "cvecondor <alerts@example.com>", "to": ["you@example.com"] },
+    // { "type": "webhook", "url": "${WEBHOOK_URL}", "headers": { "Authorization": "Bearer ${WEBHOOK_TOKEN}" } },
+    // { "type": "command", "command": ["/usr/local/bin/my-notifier"], "events": ["case", "report", "secrets"] }   // the notice on stdin
+  ]
+}
