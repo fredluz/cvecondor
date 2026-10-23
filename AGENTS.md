@@ -6,7 +6,7 @@ The split you work within:
 - **Code** (`src/`) does the cheap, always-on part: it polls feeds, reads the inventory, matches advisories, tracks what each case waits for and sends messages. It runs no model.
 - **Judgment** is yours, plus the prompts in `agent/`:
   - `agent/setup.md`: setting CVECondor up (your first job).
-  - `agent/respond/`: handling one case. `triage.md` comes first for every case and picks one path (`update`, `not-exploitable`, `workaround`, `shutdown`, `propose`, `breach`, `distrust`); you then follow that path's file. `common.md` holds the rules every path shares. It is the brief the watcher hands to the user's agent CLI, and the one you follow when you handle a case yourself.
+  - `agent/respond/`: handling one case. `triage.md` comes first for every case and picks one path (`update`, `not-exploitable`, `workaround`, `shutdown`, `propose`, `breach`, `distrust`, `split`); you then follow that path's file (`split` is written in `triage.md` itself: the fixed releases per component, from which the watcher opens one case per place). `common.md` holds the rules every path shares. It is the brief the watcher hands to the user's agent CLI, and the one you follow when you handle a case yourself.
 
 ## Start every conversation by finding out where things stand
 
@@ -59,7 +59,7 @@ The split you work within:
 | `README.md` | What CVECondor does, ways to run it, and the **config reference** (every field). |
 | `examples/config.example.jsonc` | An annotated config. |
 | `deploy/` | systemd unit, launchd plist, docker compose. `action.yml` + `examples/github-workflow.yml`: the GitHub Action. |
-| `src/` (Rust) | `watch.rs` (the cycle, cases, rating), `feeds.rs` (sources), `matching.rs` (OSV, Node index, prose), `cvelist.rs` (CVE List records: read, matched by version), `inventory/` (collectors: `github`, `host`, `docker`, `ssh`), `secrets.rs` (gitleaks), `vendors.rs` + `vendors/catalog.rs` (vendor detection and feeds), `fixes.rs` (what a case waits for), `responder.rs` (runs the user's CLI), `relay.rs` (Telegram replies to you), `notify.rs`, `inbox.rs`, `config.rs`, `cli.rs`. |
+| `src/` (Rust) | `watch.rs` (the cycle, cases, rating), `feeds.rs` (sources), `matching.rs` (OSV, Node index, prose, libraries runtimes and packages bundle), `cvelist.rs` (CVE List records: read, matched by version), `upstream.rs` (fixed releases named upstream, matched per component and release line), `inventory/` (collectors: `github`, `host`, `docker`, `ssh`), `secrets.rs` (gitleaks), `vendors.rs` + `vendors/catalog.rs` (vendor detection and feeds), `fixes.rs` (what a case waits for), `responder.rs` (runs the user's CLI), `relay.rs` (Telegram replies to you), `notify.rs`, `inbox.rs`, `config.rs`, `cli.rs`. |
 
 **Config dir** (`~/.config/cvecondor/` unless `deployment.md` says otherwise):
 - `config.json`;
@@ -72,12 +72,12 @@ The split you work within:
 
 | File | What it holds |
 |---|---|
-| `cases.json` | Every case. `state`: `pending` (to dispatch), `handled`, `watch` (recorded, below the notify floor), `unsure`/`not-affected` (prose the classifier or name match set aside), `judging`. Also `assessment` (the watcher's first rating), `triage` (the responder's: its path, why, rating, fix released, exploitable), `places`, `affected`, `atRisk` (secrets stored there), `waitingFor`, `report`, `baseline` (found at install). |
+| `cases.json` | Every case. `state`: `pending` (to dispatch), `handled`, `watch` (recorded, below the notify floor), `unsure`/`not-affected` (prose the classifier or name match set aside), `judging`. Also `assessment` (the watcher's first rating), `triage` (the responder's: its path, why, rating, fix released, exploitable), `places`, `affected`, `atRisk` (secrets stored there), `waitingFor`, `fixedReleases` (per component, from a `split` response), `splitFrom` (the case whose fixed releases opened this one), `report`, `baseline` (found at install). |
 | `cases/<key>.json` | The case file a responder works from: the case plus related cases, services, runbooks, mode. |
 | `reports/<date>-<key>.md` | Each case's report: the responder's, or the notice. |
 | `reports/<date>-batch-<time>.md`, `batches.json` | Each batch (the cases one cycle found) in full; which batches were summarised and had their results reported. |
 | `reports/<date>-<time>-<event>.md`, `inbox.jsonl`, `inbox-read.json` | Every notice, kept as a file (`urgent`, `case` = a batch summary, `report` = results, `secrets`); the inbox lists them; `inbox-read.json` marks how far you have read. |
-| `responses/<key>.json` | Each response's state, exit, report and declared waits. |
+| `responses/<key>.json` | Each response's state, exit, report, declared waits and fixed releases. |
 | `retries.json`, `relay-retries.json` | The retry queue: each case whose response did not finish (reason, attempts, when it runs again, whether the agent is out of quota), and Telegram messages the agent could not answer yet. |
 | `work/<key>-<time>/` | A response's scratch: `prompt.md`, `outbox/` (the messages it sent), `report.md`. |
 | `inventory.json` | What the collectors saw: items, services, secrets (names and fingerprints), vendor signals, and per-collector status under `sources`. |
@@ -122,7 +122,7 @@ If the watcher's rating is only its first guess (no report yet), check reachabil
 2. **Yourself, now, in this conversation:** follow `agent/respond/triage.md` and the path file it picks, with `common.md`, using the case file `cases/<key>.json`, with three differences:
    - they are here, so tell them directly instead of writing to an outbox;
    - a yes from them in conversation lets you act beyond the case's mode for that step;
-   - write your report (with its `## Message` and any `cvecondor-wait` block) to a file, then run `cvecondor record <key> --file <report>`. That marks the case handled and makes the watcher track what it waits for, reopening the case when the fix ships.
+   - write your report (with its `## Message`, any `cvecondor-wait` block, and on the `split` path the `cvecondor-fixed` block) to a file, then run `cvecondor record <key> --file <report>`. That marks the case handled and makes the watcher track what it waits for, reopening the case when the fix ships, and open one case per place from the fixed releases.
 
 **"Change what it watches, who gets told, or what it may do."**
 1. Edit the config (field reference in the README).

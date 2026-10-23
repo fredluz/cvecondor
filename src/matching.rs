@@ -9,7 +9,7 @@
 use std::time::Duration;
 
 use anyhow::{Result, bail};
-use indexmap::IndexMap;
+use indexmap::{IndexMap, IndexSet};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -83,20 +83,27 @@ pub struct Target {
     pub priority: bool,
     /// Fixed versions the advisory names for it.
     pub fixed_in: Option<Vec<String>>,
+    /// The library it carries built in that the advisory is about (`BUNDLED`): its own version is not that library's.
+    pub carries: Option<String>,
 }
 
 pub fn describe_target(t: &Target) -> String {
     let item = &t.item;
     let mut out = format!("{} {} {} {}", item.host, item.r#where, item.name, item.version);
-    if item.r#where.starts_with("repo:")
-        && let Some(path) = item.path.as_deref().filter(|p| !p.is_empty()) {
-            out.push_str(&format!(" ({path})"));
-        }
+    // Where a repo's item, or a package on a server (a venv, a lockfile in a container), was read.
+    if (item.r#where.starts_with("repo:") || item.kind == ItemKind::Package)
+        && let Some(path) = item.path.as_deref().filter(|p| !p.is_empty())
+    {
+        out.push_str(&format!(" ({path})"));
+    }
     if item.running == Some(false) {
         out.push_str(" (stopped)");
     }
     if item.dev == Some(true) {
         out.push_str(" (dev only)");
+    }
+    if let Some(library) = &t.carries {
+        out.push_str(&format!(" (bundles {library})"));
     }
     if !t.exposed.is_empty() {
         out.push_str(&format!(" exposed: {}", t.exposed.join(", ")));
@@ -120,7 +127,7 @@ pub fn target_for(item: &InventoryItem, services: &[ServiceInfo], priority: &[St
         names.extend(service.exposed.iter().cloned());
     }
     let priority = names.iter().any(|name| priority.iter().any(|pattern| glob_match(pattern, name)));
-    Target { item: item.clone(), exposed, priority, fixed_in: None }
+    Target { item: item.clone(), exposed, priority, fixed_in: None, carries: None }
 }
 
 /// What `priority`, `actOn`, `updateExcept` and runbook names match: a repo's `owner/name`, a container or unit name, or for a server's own packages, its collector name (`web1`).
@@ -542,8 +549,21 @@ fn aliases(name: &str) -> &'static [&'static str] {
         "ffmpeg" => &["ffmpeg"],
         "imagemagick" => &["imagemagick"],
         "sqlite3" => &["sqlite"],
+        "sqlite" => &["sqlite"],
         "libxml2" => &["libxml2"],
+        "libxslt" => &["libxslt"],
         "zlib" => &["zlib"],
+        // Libraries runtimes and packages also carry built in (`BUNDLED`), under their distro source names.
+        "brotli" => &["brotli"],
+        "zstd" | "libzstd" => &["zstd", "zstandard"],
+        "nghttp2" => &["nghttp2"],
+        "c-ares" => &["c-ares"],
+        "libuv" | "libuv1" => &["libuv"],
+        "libwebp" => &["libwebp"],
+        "libpng" | "libpng1.6" => &["libpng"],
+        "libjpeg-turbo" => &["libjpeg-turbo"],
+        "tiff" => &["libtiff"],
+        "freetype" => &["freetype"],
         "xz" => &["xz utils"],
         "xz-utils" => &["xz utils"],
         "exim4" => &["exim"],
@@ -564,6 +584,73 @@ fn aliases(name: &str) -> &'static [&'static str] {
         "aws" => &["aws amplify"],
         _ => &[],
     }
+}
+
+/// Libraries that runtimes and language packages carry built in rather than take from the system: an advisory about
+/// the library concerns each carrier too, at the carrier's own version. Which carrier release has the fix is the
+/// responder's to read (`upstream.rs`). A carrier is `runtime:<name>` or `<OSV ecosystem>:<package>`; the library's
+/// own distro package is matched by name (`aliases`).
+pub const BUNDLED: &[(&str, &[&str])] = &[
+    ("brotli", &["runtime:node", "runtime:bun", "PyPI:brotli", "PyPI:brotlicffi"]),
+    ("zlib", &["runtime:node", "runtime:bun", "PyPI:pillow", "PyPI:grpcio"]),
+    ("zstd", &["runtime:node", "runtime:bun", "PyPI:zstandard"]),
+    ("openssl", &["runtime:node", "PyPI:cryptography", "PyPI:psycopg2-binary", "PyPI:psycopg-binary"]),
+    ("boringssl", &["runtime:bun", "PyPI:grpcio"]),
+    ("nghttp2", &["runtime:node"]),
+    ("llhttp", &["runtime:node"]),
+    ("c-ares", &["runtime:node", "runtime:bun", "PyPI:grpcio"]),
+    ("libuv", &["runtime:node"]),
+    ("v8", &["runtime:node", "runtime:deno"]),
+    ("sqlite", &["runtime:node", "runtime:bun", "runtime:deno", "npm:better-sqlite3", "npm:sqlite3"]),
+    ("libxml2", &["PyPI:lxml"]),
+    ("libxslt", &["PyPI:lxml"]),
+    ("libwebp", &["PyPI:pillow", "npm:sharp"]),
+    ("libpng", &["PyPI:pillow", "npm:sharp"]),
+    ("libjpeg-turbo", &["PyPI:pillow", "npm:sharp"]),
+    ("libtiff", &["PyPI:pillow", "npm:sharp"]),
+    ("freetype", &["PyPI:pillow"]),
+];
+
+/// A package name as its registry compares it (PyPI: case, `_` and `.` folded to `-`).
+fn package_name_key(ecosystem: &str, name: &str) -> String {
+    let name = name.to_lowercase();
+    if osv_family(ecosystem) == "PyPI" { name.replace(['_', '.'], "-") } else { name }
+}
+
+fn is_carrier(carrier: &str, item: &InventoryItem) -> bool {
+    match carrier.split_once(':') {
+        Some(("runtime", name)) => item.kind == ItemKind::Runtime && item.name.eq_ignore_ascii_case(name),
+        Some((ecosystem, name)) => {
+            item.kind == ItemKind::Package
+                && item.ecosystem.as_deref().is_some_and(|e| osv_family(e) == ecosystem && package_name_key(e, &item.name) == package_name_key(e, name))
+        }
+        None => false,
+    }
+}
+
+/// The libraries an item carries built in.
+pub fn bundled_in(item: &InventoryItem) -> Vec<&'static str> {
+    BUNDLED.iter().filter(|(_, carriers)| carriers.iter().any(|c| is_carrier(c, item))).map(|(library, _)| *library).collect()
+}
+
+/// The first of `terms` that the item carries built in: what its target says it bundles.
+pub fn carried(item: &InventoryItem, terms: &[String]) -> Option<String> {
+    let bundled = bundled_in(item);
+    terms.iter().find(|t| bundled.contains(&t.as_str())).cloned()
+}
+
+/// Library → the items that carry it built in (at most 60 per library), for the advisories that name the library.
+pub fn carrier_terms(inventory: &Inventory) -> IndexMap<String, Vec<&InventoryItem>> {
+    let mut terms: IndexMap<String, Vec<&InventoryItem>> = IndexMap::new();
+    for item in &inventory.items {
+        for library in bundled_in(item) {
+            let list = terms.entry(library.to_string()).or_default();
+            if list.len() < 60 {
+                list.push(item);
+            }
+        }
+    }
+    terms
 }
 
 /// Product names a prose advisory could mention, each with the inventory items it stands for (at most 60 per name).
@@ -630,14 +717,17 @@ pub fn mentions(text: &str, term: &str) -> bool {
     mentions_lower(&text.to_ascii_lowercase(), &term.to_ascii_lowercase())
 }
 
-/// Items naming a product we run, grouped by the products they name. CA incidents concern every TLS client.
+/// Items naming a product we run, or a library something we run carries built in, grouped by the names they use. CA
+/// incidents concern every TLS client.
 pub fn prose_candidates(items: &[ProseItem], inventory: &Inventory, priority: &[String]) -> Vec<ProseCandidate> {
     let terms = product_terms(inventory);
+    let carriers = carrier_terms(inventory);
     // The group's candidate with the inventory items already turned into its targets (compared by identity).
     let mut groups: IndexMap<String, (ProseCandidate, Vec<&InventoryItem>)> = IndexMap::new();
     for item in items {
         let text = format!("{} {}", item.title, item.text).to_ascii_lowercase();
-        let mut hit: Vec<String> = terms.keys().filter(|term| mentions_lower(&text, &term.to_ascii_lowercase())).cloned().collect();
+        let mut hit: Vec<String> =
+            terms.keys().chain(carriers.keys()).filter(|term| mentions_lower(&text, &term.to_ascii_lowercase())).cloned().collect::<IndexSet<_>>().into_iter().collect();
         // The Node blog's items name no product: it is Node's own feed.
         if item.source == "node-security-blog" {
             hit = if terms.contains_key("node.js") { vec!["node.js".to_string()] } else { Vec::new() };
@@ -648,7 +738,8 @@ pub fn prose_candidates(items: &[ProseItem], inventory: &Inventory, priority: &[
         if hit.is_empty() {
             continue;
         }
-        let matched: Vec<&InventoryItem> = if item.source == "ca-incidents" {
+        // Each item once: as the product named when it is one, else as the carrier of a library named.
+        let matched: Vec<(&InventoryItem, bool)> = if item.source == "ca-incidents" {
             inventory
                 .items
                 .iter()
@@ -657,9 +748,11 @@ pub fn prose_candidates(items: &[ProseItem], inventory: &Inventory, priority: &[
                         || i.name == "certifi"
                         || i.name == "ca-certificates"
                 })
+                .map(|i| (i, false))
                 .collect()
         } else {
-            hit.iter().flat_map(|term| terms.get(term).into_iter().flatten().copied()).collect()
+            let products = hit.iter().flat_map(|term| terms.get(term).into_iter().flatten().map(|i| (*i, false)));
+            products.chain(hit.iter().flat_map(|term| carriers.get(term).into_iter().flatten().map(|i| (*i, true)))).collect()
         };
         if matched.is_empty() {
             continue;
@@ -668,10 +761,14 @@ pub fn prose_candidates(items: &[ProseItem], inventory: &Inventory, priority: &[
         let key = hit.join("|");
         let (group, done) = groups.entry(key).or_insert_with(|| (ProseCandidate { items: Vec::new(), terms: hit, targets: Vec::new() }, Vec::new()));
         group.items.push(item.clone());
-        for i in matched {
+        for (i, carrier) in matched {
             if !done.iter().any(|d| std::ptr::eq(*d, i)) {
                 done.push(i);
-                group.targets.push(target_for(i, &inventory.services, priority));
+                let mut target = target_for(i, &inventory.services, priority);
+                if carrier {
+                    target.carries = carried(i, &group.terms);
+                }
+                group.targets.push(target);
             }
         }
     }
@@ -699,7 +796,7 @@ impl Verdict {
 }
 
 pub const JUDGE_INSTRUCTIONS: &str = "You triage a security advisory against the software one organisation runs (servers, Docker containers, and the code in its GitHub repos).
-affected: the advisory plausibly applies to a listed item at its listed version, or the advisory gives no versions and the product is the same, or it is a CA compromise/distrust affecting TLS clients' trust stores.
+affected: the advisory plausibly applies to a listed item at its listed version, or the advisory gives no versions and the product is the same, or a listed item bundles the library the advisory is about (its line says \"bundles <library>\": its own version is not the library's), or it is a CA compromise/distrust affecting TLS clients' trust stores.
 not-affected: the advisory is about a different product that only shares a word with a listed item, or every listed version is clearly outside the affected range, or it is routine news with no vulnerability.
 unsure: you cannot tell.";
 
@@ -949,6 +1046,40 @@ mod tests {
         assert_eq!(groups[0].targets.len(), 1);
         assert!(groups[0].targets[0].priority);
         assert_eq!(describe_target(&groups[0].targets[0]), "web1 container:proxy nginx 1.27 [priority]");
+    }
+
+    #[test]
+    fn an_advisory_naming_a_library_reaches_what_carries_it_built_in_marked_as_such() {
+        let inv = inventory(vec![
+            item("web1", "container:api", ItemKind::Runtime, None, "node", "22.23.2"),
+            item("web1", "container:edge", ItemKind::OsPackage, Some("Alpine:v3.22"), "brotli", "1.2.0-r0"),
+            item("web1", "host", ItemKind::Package, Some("PyPI"), "Brotli", "1.2.0"),
+            item("web1", "host", ItemKind::Package, Some("PyPI"), "requests", "2.32.0"),
+            item("web1", "container:py", ItemKind::Runtime, None, "python", "3.12.7"),
+        ]);
+        let advisory = ProseItem {
+            source: "cert-eu".into(),
+            id: "a".into(),
+            title: "Brotli decoder overflow".into(),
+            text: "Fixed in Brotli 1.2.1.".into(),
+            url: String::new(),
+            published: None,
+            cves: Vec::new(),
+            exploited: None,
+            high_signal: true,
+            changed: None,
+            vendor: None,
+            news: None,
+        };
+        let groups = prose_candidates(&[advisory], &inv, &[]);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].terms, ["brotli"]);
+        let lines: Vec<String> = groups[0].targets.iter().map(describe_target).collect();
+        assert_eq!(
+            lines,
+            ["web1 container:edge brotli 1.2.0-r0", "web1 container:api node 22.23.2 (bundles brotli)", "web1 host Brotli 1.2.0 (bundles brotli)"],
+            "the distro's own build is the product; node and the PyPI binding carry it; python and requests don't"
+        );
     }
 
     #[test]

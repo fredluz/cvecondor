@@ -26,8 +26,8 @@ use crate::feeds::{FeedState, NEWS_SOURCES, NodeIndexEntry, PollOptions, PollRes
 use crate::fixes::{FixWait, WaitPackage, check_wait, describe_wait};
 use crate::http::Fetch;
 use crate::matching::{
-    OsvAffected, OsvHit, OsvRecord, ProseCandidate, Severity, Target, Verdict, at_least, classify, describe_secret, describe_target, judge, node_index_matches,
-    osv_family, osv_fixes, osv_query, osv_record, osv_severity, place_name, prose_candidates, secrets_at_risk, target_for,
+    OsvAffected, OsvHit, OsvRecord, ProseCandidate, Severity, Target, Verdict, at_least, carried, classify, describe_secret, describe_target, judge,
+    node_index_matches, osv_family, osv_fixes, osv_query, osv_record, osv_severity, place_name, prose_candidates, secrets_at_risk, target_for,
 };
 use crate::notify::{Notice, Notifier};
 use crate::responder::message_of;
@@ -35,6 +35,7 @@ use crate::retry::{self, Queue};
 use crate::secrets::{Exposure, SecretFinding, finding_key};
 use crate::state::{glob_match, read_state, slug, write_file_atomic, write_state};
 use crate::types::{Inventory, InventoryItem};
+use crate::upstream::{FixedRelease, Reading};
 use crate::util::{iso, local_date, parallel_map, parse_time};
 use crate::vendors::{
     RotationMap, UserVendor, VENDOR_LABELS, detect_vendors, rotation_for, vendor_candidates, vendor_input, vendor_instructions, vendor_sources,
@@ -165,6 +166,13 @@ pub struct Case {
     /// The responder's triage: the path it followed and the fact that decided it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub triage: Option<Triage>,
+    /// Fixed releases the responder read at the sources, per component (`upstream.rs`): each cycle, every item they
+    /// reach that is not on a fixed release yet gets a case of its own place.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixed_releases: Option<Vec<FixedRelease>>,
+    /// The case whose fixed releases opened this one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub split_from: Option<String>,
 }
 
 /// `known.json`: what the watcher has already seen.
@@ -206,6 +214,9 @@ pub struct ResponseRecord {
     pub waits: Option<Vec<FixWait>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub triage: Option<Triage>,
+    /// The fixed releases its report names (a `<NAME>-fixed` block).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixed: Option<Vec<FixedRelease>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -325,6 +336,9 @@ pub enum TriagePath {
     Distrust,
     NotAffected,
     AlreadyHandled,
+    /// The sources name fixed releases the case's places don't show: the report's fixed releases hand every
+    /// component over to the cases the watcher opens from them, one per place.
+    Split,
 }
 
 /// The responder's triage: the path it followed and the fact that decided it.
@@ -375,6 +389,16 @@ pub fn merge_responses(dir: &Path, cases: &mut IndexMap<String, Case>, at: &str)
         c.handled_at = Some(record.finished_at.clone().unwrap_or_else(|| at.to_string()));
         if let Some(waits) = record.waits.as_deref().filter(|w| !w.is_empty()) {
             c.waiting_for = Some(merge_waits(c.waiting_for.as_deref(), waits));
+        }
+        // A later run's line for a component replaces the earlier one; the other components stay.
+        if let Some(fixed) = record.fixed.as_deref().filter(|f| !f.is_empty()) {
+            let known = c.fixed_releases.get_or_insert_with(Vec::new);
+            for release in fixed {
+                match known.iter_mut().find(|k| k.runtime == release.runtime && k.package == release.package) {
+                    Some(k) => k.clone_from(release),
+                    None => known.push(release.clone()),
+                }
+            }
         }
         if record.triage.is_some() {
             c.triage = record.triage.clone();
@@ -455,8 +479,9 @@ fn node_released(i: &ProseItem) -> bool {
     parse_day_utc(&day).is_some_and(|released| published >= released)
 }
 
+/// The item says a fix is out: in words, on a Node release day, or by being a release (Bun's own release feed).
 fn fix_named(i: &ProseItem) -> bool {
-    FIX_WORDS.is_match(&format!("{} {}", i.title, i.text)) || node_released(i)
+    FIX_WORDS.is_match(&format!("{} {}", i.title, i.text)) || node_released(i) || i.source == "bun-releases"
 }
 
 /// `cases/<slug of the key>.json`: the case file a responder works from.
@@ -720,6 +745,8 @@ fn new_case(key: String, kind: CaseKind, title: String, state: CaseState, reason
         reopened_at: None,
         dispatch_error: None,
         triage: None,
+        fixed_releases: None,
+        split_from: None,
     }
 }
 
@@ -870,6 +897,7 @@ pub fn run_cycle(config: &Config, deps: &CycleDeps) -> Result<CycleSummary> {
     cy.prose_phase(&poll, cve_candidates);
     cy.vendor_phase(&poll, &vendors, &rotation);
     cy.fix_phase();
+    cy.releases_phase();
     cy.dispatch()?;
     cy.secrets_phase();
 
@@ -1324,6 +1352,16 @@ impl Cycle<'_, '_> {
                 })
                 .collect();
             let fixes = unique(matched.affected.iter().flat_map(|(_, f)| f.iter().cloned()));
+            // What the record names without a range that settles it, and what carries the library it names built in.
+            let riders: Vec<Target> = matched
+                .candidates
+                .iter()
+                .map(|i| {
+                    let mut t = target_for(i, &inventory.services, &self.config.priority);
+                    t.carries = carried(i, &matched.terms);
+                    t
+                })
+                .collect();
             if let Some(key) = by_alias(&self.cases, std::slice::from_ref(&record.id)) {
                 let Some(c) = self.cases.get_mut(&key) else { continue };
                 c.urls = unique(c.urls.iter().cloned().chain(std::iter::once(cvelist::cve_org_url(&record.id))));
@@ -1376,16 +1414,17 @@ impl Cycle<'_, '_> {
                 c.aliases = vec![record.id.clone()];
                 c.urls = unique(std::iter::once(cvelist::cve_org_url(&record.id)).chain(record.references.iter().take(1).cloned()));
                 c.sources = vec![cvelist::SOURCE.to_string()];
-                c.targets = targets.iter().map(describe_target).collect();
-                c.affected = Some(affected_of(&targets));
-                c.places = places_of(&targets);
-                c.priority = Some(targets.iter().any(|t| t.priority));
+                // The rest the record reaches rides along for the responder to settle (`upstream.rs`).
+                let all: Vec<Target> = targets.iter().cloned().chain(riders).collect();
+                c.targets = all.iter().map(describe_target).collect();
+                c.affected = Some(affected_of(&all));
+                c.places = places_of(&all);
+                c.priority = Some(all.iter().any(|t| t.priority));
                 c.terms = Some(names);
                 self.open(c);
             } else if !matched.candidates.is_empty() {
-                let targets: Vec<Target> = matched.candidates.iter().map(|i| target_for(i, &inventory.services, &self.config.priority)).collect();
                 let terms = if matched.terms.is_empty() { unique(matched.candidates.iter().map(|i| i.name.clone())) } else { matched.terms.clone() };
-                candidates.push(ProseCandidate { items: vec![cvelist::prose_item(record)], terms, targets });
+                candidates.push(ProseCandidate { items: vec![cvelist::prose_item(record)], terms, targets: riders });
             }
         }
         candidates
@@ -1664,6 +1703,87 @@ impl Cycle<'_, '_> {
             }
             let remaining: Vec<String> = c.waiting_for.iter().flatten().map(json).collect();
             c.waits_checked = Some(checked.into_iter().filter(|id| remaining.contains(id)).collect());
+        }
+    }
+
+    /// Fixed releases named upstream (`upstream.rs`), from a case's response: every item they reach that is not on a
+    /// fixed release yet gets a case of its own place, showing the release it moves to, whether or not any database
+    /// has mapped the advisory for its ecosystem. An item whose line gets no fix gets a case of its own (move to a
+    /// supported line); an item with no fixed release yet goes through triage like any unfixed case. Run every cycle,
+    /// so what is deployed later is found too. A case already open for the place stays as it is, except one that had
+    /// no fix, which a newly named fix reopens.
+    fn releases_phase(&mut self) {
+        let inventory = self.inventory;
+        let at = self.at.clone();
+        let sources: Vec<Case> =
+            self.cases.values().filter(|c| c.split_from.is_none() && c.fixed_releases.as_ref().is_some_and(|f| !f.is_empty())).cloned().collect();
+        for from in sources {
+            let releases = from.fixed_releases.as_deref().unwrap_or_default();
+            if releases.iter().any(|r| !r.fixed.is_empty())
+                && let Some(c) = self.cases.get_mut(&from.key)
+            {
+                // Its fix is named: a database that maps it later joins it rather than reopening it.
+                c.fix_available = true;
+            }
+            // (place, moves to another line) → its targets.
+            let mut groups: IndexMap<(String, bool), Vec<Target>> = IndexMap::new();
+            for item in &inventory.items {
+                let Some(reading) = releases.iter().filter(|r| r.covers(item)).find_map(|r| r.read(item)) else { continue };
+                let (moves, to) = match reading {
+                    Reading::Fixed => continue,
+                    Reading::Update(to) => (false, Some(to)),
+                    Reading::MoveLine(to) => (true, Some(to)),
+                    Reading::NoFix => (false, None),
+                };
+                let mut t = target_for(item, &inventory.services, &self.config.priority);
+                t.fixed_in = to.map(|to| vec![to]);
+                groups.entry((format!("{} {}", item.host, item.r#where), moves)).or_default().push(t);
+            }
+            for ((place, moves), targets) in groups {
+                let key = format!("{} @ {place}{}", from.key, if moves { " (move line)" } else { "" });
+                let fixes = unique(targets.iter().flat_map(|t| t.fixed_in.iter().flatten().cloned()));
+                if let Some(c) = self.cases.get_mut(&key) {
+                    if c.state == CaseState::Handled && !c.fix_available && !fixes.is_empty() {
+                        c.targets = targets.iter().map(describe_target).collect();
+                        reopen(c, &mut self.summary, &at, format!("fix released: {}; apply it and remove the temporary mitigation", fixes.join(", ")));
+                    }
+                    continue;
+                }
+                let name = place_name(&targets[0].item.host, &targets[0].item.r#where);
+                let items = targets.iter().map(|t| format!("{} {}", t.item.name, t.item.version)).collect::<Vec<_>>().join(", ");
+                let unfixed = targets.iter().any(|t| t.fixed_in.is_none());
+                let (title, reason) = if moves {
+                    (
+                        format!("{}: {items}: its line gets no fix, move to a supported line ({} or later) in {name}", from.key, fixes.join(" / ")),
+                        "its release line gets no fix: moving to a supported line is the update".to_string(),
+                    )
+                } else if fixes.is_empty() {
+                    (format!("{}: {items}: no fixed release yet, in {name}", from.key), "no fixed release yet: mitigate until it ships".to_string())
+                } else {
+                    let change = |t: &Target| match t.fixed_in.as_deref().and_then(<[String]>::first) {
+                        Some(to) => format!("{} {} to {to}", t.item.name, t.item.version),
+                        None => format!("{} {} (no fixed release yet)", t.item.name, t.item.version),
+                    };
+                    let more = if unfixed { "; some have no fixed release yet: mitigate those until it ships" } else { "" };
+                    (
+                        format!("{}: update {} in {name}", from.key, targets.iter().map(change).collect::<Vec<_>>().join(", ")),
+                        format!("fixed release named upstream, ahead of the databases{more}"),
+                    )
+                };
+                let mut c = new_case(key, CaseKind::Vulnerability, title, CaseState::Pending, reason, from.severity, &at);
+                c.exploited = from.exploited;
+                c.fix_available = !fixes.is_empty();
+                c.aliases = from.aliases.clone();
+                c.urls = from.urls.clone();
+                c.sources = from.sources.clone();
+                c.targets = targets.iter().map(describe_target).collect();
+                c.affected = Some(affected_of(&targets));
+                c.places = places_of(&targets);
+                c.priority = Some(targets.iter().any(|t| t.priority));
+                c.terms = Some(unique(targets.iter().map(|t| t.item.name.clone())));
+                c.split_from = Some(from.key.clone());
+                self.open(c);
+            }
         }
     }
 

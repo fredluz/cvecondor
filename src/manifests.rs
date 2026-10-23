@@ -487,6 +487,11 @@ fn distro(name: &str, tag: &str) -> RepoFinding {
     }
 }
 
+/// The runtimes an image reference's tag names (`oven/bun:1.3.5-alpine` is bun 1.3.5, `wordpress:6-php8.3` php 8.3).
+pub fn image_runtimes(reference: &str) -> Vec<(String, String)> {
+    image_findings(reference).into_iter().filter(|f| f.kind == RepoFindingKind::Runtime).map(|f| (f.name, f.version)).collect()
+}
+
 /// An image reference → the image itself, plus the runtime or base OS an official image's tag names.
 fn image_findings(reference: &str) -> Vec<RepoFinding> {
     let bare = js_trim(reference.split('@').next().unwrap_or(""));

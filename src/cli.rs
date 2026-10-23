@@ -35,6 +35,7 @@ use crate::responder::{StartOptions, recover_responses, running_count, start_res
 use crate::secrets::Exposure;
 use crate::state::{read_state, slug, with_lock, write_file_atomic, write_state};
 use crate::types::{Inventory, InventoryItem};
+use crate::upstream::{FixedRelease, parse_fixed};
 use crate::util::{self, iso, parse_time};
 use crate::vendors::catalog::VENDORS;
 use crate::vendors::detect_vendors;
@@ -67,7 +68,8 @@ Usage: {NAME} <command> [--config FILE]
   respond KEY [--mode propose|update|act]
                       run the configured responder on one case now (KEY: case key or CVE/GHSA id) and wait for it
   record KEY --file REPORT
-                      record a case you handled yourself: its report, and the cvecondor-wait block (what it waits for)
+                      record a case you handled yourself: its report, the cvecondor-wait block (what it waits for) and the
+                      cvecondor-fixed block (fixed releases per component: one case per place follows)
   follow [--once | --test] [--config FILE]
                       on your own machine: each urgent line from the watcher opens a session of your agent
                       (reads follow.json, not the watcher's config); --once polls once, --test sends a test line
@@ -350,6 +352,7 @@ fn record_report(config: &Config, key: Option<&str>, file: Option<&str>) -> Resu
         fs::DirBuilder::new().recursive(true).mode(0o700).create(dir.join("reports"))?;
         write_file_atomic(Path::new(&report), &format!("{}\n", text.trim_end()))?;
         let waits = parse_waits(&text);
+        let fixed = parse_fixed(&text);
         let record = ResponseRecord {
             key: key.clone(),
             state: ResponseState::Done,
@@ -357,6 +360,7 @@ fn record_report(config: &Config, key: Option<&str>, file: Option<&str>) -> Resu
             finished_at: Some(at.clone()),
             report: Some(report.clone()),
             waits: Some(waits.clone()),
+            fixed: Some(fixed.clone()),
             triage: None,
             error: None,
             pid: None,
@@ -375,10 +379,11 @@ fn record_report(config: &Config, key: Option<&str>, file: Option<&str>) -> Resu
         let describe = |waits: &[crate::fixes::FixWait]| waits.iter().map(describe_wait).collect::<Vec<_>>().join("; ");
         let or = |text: String, empty: &str| if text.is_empty() { empty.to_string() } else { text };
         Ok(format!(
-            "Recorded {key}. Report: {report}\nFrom your report: {}\nThe watcher now checks {} wait(s): {}",
+            "Recorded {key}. Report: {report}\nFrom your report: {}\nThe watcher now checks {} wait(s): {}\nFixed releases (the next cycle opens a case per place from them): {}",
             or(describe(&waits), "no cvecondor-wait block"),
             tracked.len(),
-            or(describe(tracked), "none")
+            or(describe(tracked), "none"),
+            or(fixed.iter().map(FixedRelease::describe).collect::<Vec<_>>().join("; "), "no cvecondor-fixed block")
         ))
     })
     .transpose()?;

@@ -128,6 +128,23 @@ fn container_env_secrets_are_names_and_fingerprints_only_exposure_from_virtual_h
 }
 
 #[test]
+fn an_official_runtime_image_that_sets_no_version_in_its_env_counts_the_version_its_tag_names() {
+    let mut raw = inspect_json();
+    raw["Config"]["Image"] = json!("oven/bun:1.3.5-alpine");
+    let bun: ContainerInspect = serde_json::from_value(raw).expect("inspect parses");
+    let result = container_inventory("web1", &bun, &ContainerInput::default());
+    let runtimes: Vec<_> = result.items.iter().filter(|i| i.kind == ItemKind::Runtime).map(|i| (i.name.as_str(), i.version.as_str())).collect();
+    assert_eq!(runtimes, [("node", "22.11.0"), ("bun", "1.3.5")]);
+    // The env's version wins over the tag's.
+    let mut raw = inspect_json();
+    raw["Config"]["Image"] = json!("node:22-alpine");
+    let node: ContainerInspect = serde_json::from_value(raw).expect("inspect parses");
+    let result = container_inventory("web1", &node, &ContainerInput::default());
+    let runtimes: Vec<_> = result.items.iter().filter(|i| i.kind == ItemKind::Runtime).map(|i| (i.name.as_str(), i.version.as_str())).collect();
+    assert_eq!(runtimes, [("node", "22.11.0")]);
+}
+
+#[test]
 fn dpkg_status_source_package_names_and_versions_installed_only() {
     let items = dpkg_status_items(DPKG, Base { ecosystem: Some("Ubuntu:24.04:LTS"), ..Base::new("h", "host") });
     let got: Vec<_> = items.iter().map(|i| (i.name.as_str(), i.version.as_str(), i.path.as_deref().unwrap_or(""))).collect();
@@ -173,6 +190,8 @@ fn ssh_output_host_packages_runtimes_containers_files_script_is_valid_sh() {
         "|started".to_string(),
         "@@file 644 /opt/web/.env@@".to_string(),
         pipe(&format!("API_TOKEN={GHP}")),
+        "@@venvs@@".to_string(),
+        pipe("/opt/worker/.venv/lib/python3.12/site-packages/Brotli-1.2.0.dist-info\n/opt/worker/.venv/lib/python3.12/site-packages/not-a-dist-info"),
         "@@end@@".to_string(),
         String::new(),
     ]
@@ -183,6 +202,8 @@ fn ssh_output_host_packages_runtimes_containers_files_script_is_valid_sh() {
     assert!(has("host", "linux kernel", "6.8.0-45-generic") && has("host", "node", "20.18.0"));
     assert!(r.collected.items.iter().any(|i| i.r#where == "container:web" && i.name == "openssl" && i.ecosystem.as_deref() == Some("Alpine:v3.22")));
     assert!(has("container:web", "lodash", "4.17.20"));
+    let venv: Vec<_> = r.collected.items.iter().filter(|i| i.ecosystem.as_deref() == Some("PyPI")).map(|i| (i.r#where.as_str(), i.name.as_str(), i.version.as_str(), i.path.as_deref())).collect();
+    assert_eq!(venv, [("host", "Brotli", "1.2.0", Some("/opt/worker/.venv"))]);
     assert_eq!(r.collected.services[0].r#where, "container:web");
     let sources: Vec<_> = r.sources.iter().map(|s| (s.location.as_str(), s.exposure)).collect();
     assert_eq!(sources, [("logs", Exposure::Log), ("/opt/web/.env", Exposure::HostFile)]);
@@ -228,7 +249,7 @@ fn ssh_script_probes_versions_without_sudo_and_reports_a_refused_docker() {
 fn collect_host_on_a_fake_debian_root_packages_and_a_world_readable_env_secret_by_fingerprint() {
     let root = TempDir::new("cvw-host");
     let at = |p: &str| root.path().join(p);
-    for dir in ["etc", "var/lib/dpkg", "opt/app"] {
+    for dir in ["etc", "var/lib/dpkg", "opt/app", "opt/app/.venv/lib/python3.12/site-packages/Brotli-1.2.0.dist-info", "opt/worker/lib/python3.11/site-packages/brotlicffi-1.2.0.1.dist-info"] {
         std::fs::create_dir_all(at(dir)).expect("mkdir");
     }
     std::fs::write(at("etc/os-release"), "PRETTY_NAME=\"Debian GNU/Linux 12 (bookworm)\"\r\nID=\"debian\"\r\nVERSION_ID=\"12\"\r\n").expect("write");
@@ -240,6 +261,9 @@ fn collect_host_on_a_fake_debian_root_packages_and_a_world_readable_env_secret_b
     let r = collect_host(&config, &context(root.path(), &net)).expect("collects");
     assert!(r.items.iter().any(|i| i.name == "openssl" && i.ecosystem.as_deref() == Some("Debian:12")));
     assert!(r.items.iter().any(|i| i.kind == ItemKind::Os && i.name == "Debian GNU/Linux 12 (bookworm)"));
+    let mut venvs: Vec<_> = r.items.iter().filter(|i| i.ecosystem.as_deref() == Some("PyPI")).map(|i| (i.name.as_str(), i.version.as_str(), i.path.as_deref())).collect();
+    venvs.sort_unstable();
+    assert_eq!(venvs, [("Brotli", "1.2.0", Some("/opt/app/.venv")), ("brotlicffi", "1.2.0.1", Some("/opt/worker"))], "a venv in a project dir, or the dir itself");
     let hit = r.secrets.iter().find(|s| s.exposure == Exposure::HostFile && s.location == "/opt/app/.env").expect("the .env secret");
     assert!(is_fingerprint(hit.fingerprint.as_deref()) && hit.line == Some(2) && hit.risk.contains("World-readable"));
     assert!(!format!("{r:?}").contains(GHP));

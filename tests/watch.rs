@@ -945,3 +945,152 @@ fn a_cve_list_record_of_a_cve_osv_already_reported_joins_its_case_and_makes_it_u
     assert_eq!((c.state, c.exploited, c.fix_available), (CaseState::Handled, Some(true), true), "{}", c.reason);
     assert!(c.targets.iter().any(|t| t.ends_with("fixed in 1.3.1")), "{:?}", c.targets);
 }
+
+/// The Brotli advisory of Oct 2026 (CVE-2026-111497), with the fixed releases its public sources name (title and text made
+/// up): the C library's record names the library's fixed releases; the runtimes and packages that carry the library fix it
+/// at their own versions, which no database had mapped yet.
+fn brotli_record() -> Value {
+    json!({
+        "title": "Brotli decoder overflow",
+        "descriptions": [{ "lang": "en", "value": "A crafted stream overflows the Brotli decoder." }],
+        "affected": [{
+            "vendor": "Google", "product": "Brotli", "defaultStatus": "unaffected",
+            "versions": [
+                { "status": "affected", "version": "0", "lessThan": "1.0.10", "versionType": "semver" },
+                { "status": "affected", "version": "1.1.0", "lessThan": "1.1.1", "versionType": "semver" },
+                { "status": "affected", "version": "1.2.0", "lessThan": "1.2.1", "versionType": "semver" }
+            ]
+        }],
+        "metrics": [{ "format": "CVSS", "cvssV3_1": { "version": "3.1", "baseSeverity": "HIGH", "baseScore": 7.5 } }]
+    })
+}
+
+/// The fixture stack plus what carries the library: containers on Bun and Node (one each already on its fix), Node 20
+/// (a line that gets no fix), venvs on the server, and Alpine and Debian images.
+fn brotli_stack() -> Inventory {
+    let mut inv = inventory();
+    let extra: Vec<cvecondor::types::InventoryItem> = serde_json::from_value(json!([
+        { "host": "web1", "where": "container:bun-app", "kind": "runtime", "name": "bun", "version": "1.3.5", "path": "image tag: oven/bun:1.3.5-alpine", "running": true },
+        { "host": "web1", "where": "container:bun-next", "kind": "runtime", "name": "bun", "version": "1.4.4", "running": true },
+        { "host": "web1", "where": "container:legacy-worker", "kind": "runtime", "name": "node", "version": "20.19.6", "running": true },
+        { "host": "web1", "where": "container:api-next", "kind": "runtime", "name": "node", "version": "24.22.1", "running": true },
+        { "host": "web1", "where": "host", "kind": "package", "ecosystem": "PyPI", "name": "Brotli", "version": "1.2.0", "path": "/opt/worker/.venv" },
+        { "host": "web1", "where": "host", "kind": "package", "ecosystem": "PyPI", "name": "brotlicffi", "version": "1.2.1.0", "path": "/opt/reports/.venv" },
+        { "host": "web1", "where": "container:edge", "kind": "os-package", "ecosystem": "Alpine:v3.22", "name": "brotli", "version": "1.2.0-r0", "path": "brotli-libs", "running": true },
+        { "host": "web1", "where": "container:edge-next", "kind": "os-package", "ecosystem": "Alpine:v3.22", "name": "brotli", "version": "1.2.1-r0", "path": "brotli-libs", "running": true },
+        { "host": "web1", "where": "container:docs", "kind": "os-package", "ecosystem": "Debian:12", "name": "brotli", "version": "1.0.9-2+b6", "path": "libbrotli1", "running": true }
+    ]))
+    .expect("the items parse");
+    inv.items.extend(extra);
+    inv
+}
+
+/// What a responder's run on the split path leaves: its report, with the fixed releases it read at the sources.
+fn split_response(h: &Harness, key: &str, fixed: &[&str], finished_at: &str) {
+    let block = fixed.join("\n");
+    let report = h.config.state_dir.join(format!("{}-split-{}.md", slug(key), finished_at.replace(':', "")));
+    std::fs::write(&report, format!("## Message\nPlan it: one case per place from the fixed releases.\n\n```cvecondor-fixed\n{block}\n```\n")).expect("writes the report");
+    let text = std::fs::read_to_string(&report).expect("reads the report");
+    let record = json!({
+        "key": key, "state": "done", "startedAt": "2026-10-21T08:13:00.000Z", "finishedAt": finished_at, "report": report,
+        "fixed": cvecondor::upstream::parse_fixed(&text), "triage": { "path": "split", "why": "the sources name each component's fixed release" }
+    });
+    write_state(&h.config.state_dir, &format!("responses/{}.json", slug(key)), &record).expect("writes the response");
+}
+
+#[test]
+fn fixed_releases_named_upstream_open_one_case_per_place_with_the_release_it_moves_to_before_any_database_maps_them() {
+    let mut net = Net::new("2026-10-20T00:00:00Z");
+    net.routes = vec![cve_log(&[("2026-10-22T08:00:00.000Z", &[], &[])])];
+    let h = Harness::new(net, json!({ "responder": { "agent": "claude", "maxPerCycle": 20 } }));
+    write_state(&h.config.state_dir, "inventory.json", &brotli_stack()).expect("writes the inventory");
+    h.cycle();
+    h.net(|n| {
+        n.routes = vec![
+            cve_log(&[("2026-10-22T09:00:00.000Z", &["CVE-2026-111497"], &[]), ("2026-10-22T08:00:00.000Z", &[], &[])]),
+            cve_record("CVE-2026-111497", brotli_record(), json!([])),
+        ];
+    });
+    h.cycle();
+    // The record settles the venv's Brotli by its range; what carries the library, and the distros' own builds, ride along.
+    let umbrella = &h.cases()["CVE-2026-111497"];
+    for line in [
+        "web1 host Brotli 1.2.0 (/opt/worker/.venv) fixed in 1.2.1",
+        "web1 container:bun-app bun 1.3.5 (bundles brotli)",
+        "web1 container:api node 22.23.2 (bundles brotli) exposed: api.example.com [priority]",
+        "web1 container:edge brotli 1.2.0-r0",
+    ] {
+        assert!(umbrella.targets.iter().any(|t| t == line), "{line} missing from {:#?}", umbrella.targets);
+    }
+    assert_eq!(h.responded().len(), 1);
+
+    // Its responder reads the sources and takes the split path: one line per component, as the advisory names them.
+    split_response(
+        &h,
+        "CVE-2026-111497",
+        &[
+            r#"{"runtime": "node", "fixed": ["22.23.4", "24.22.1", "26.12.1"]}"#,
+            r#"{"runtime": "bun", "fixed": ["1.4.4"]}"#,
+            r#"{"package": "PyPI:Brotli", "fixed": ["1.2.1"]}"#,
+            r#"{"package": "PyPI:brotlicffi", "fixed": ["1.2.1.0"]}"#,
+            r#"{"package": "Alpine:brotli-libs", "fixed": ["1.2.1-r0"]}"#,
+            r#"{"package": "Debian:brotli", "fixed": []}"#,
+        ],
+        "2026-10-21T08:20:00.000Z",
+    );
+    let summary = h.cycle();
+    let cases = h.cases();
+    let opened: IndexMap<&str, &Case> = summary.new_cases.iter().map(|k| (k.as_str(), &cases[k.as_str()])).collect();
+    let mut keys: Vec<&str> = opened.keys().copied().collect();
+    keys.sort_unstable();
+    // Already on a fixed release: bun-next, api-next, edge-next and the brotlicffi venv get nothing.
+    assert_eq!(
+        keys,
+        [
+            "CVE-2026-111497 @ github repo:acme/api",
+            "CVE-2026-111497 @ web1 container:api",
+            "CVE-2026-111497 @ web1 container:bun-app",
+            "CVE-2026-111497 @ web1 container:docs",
+            "CVE-2026-111497 @ web1 container:edge",
+            "CVE-2026-111497 @ web1 container:legacy-worker (move line)",
+            "CVE-2026-111497 @ web1 host",
+            "CVE-2026-111497 @ web1 host (move line)",
+        ]
+    );
+    let case = |place: &str| opened[format!("CVE-2026-111497 @ {place}").as_str()];
+    assert_eq!(case("web1 container:bun-app").title, "CVE-2026-111497: update bun 1.3.5 to 1.4.4 in bun-app");
+    assert_eq!(case("web1 container:bun-app").targets, ["web1 container:bun-app bun 1.3.5 fixed in 1.4.4"]);
+    assert_eq!(case("web1 container:api").targets, ["web1 container:api node 22.23.2 exposed: api.example.com [priority] fixed in 22.23.4"]);
+    assert_eq!(case("github repo:acme/api").targets, ["github repo:acme/api node 22.21.0 (Dockerfile) fixed in 22.23.4"]);
+    assert_eq!(
+        case("web1 container:legacy-worker (move line)").title,
+        "CVE-2026-111497: node 20.19.6: its line gets no fix, move to a supported line (22.23.4 or later) in legacy-worker"
+    );
+    assert_eq!(case("web1 host (move line)").targets, ["web1 host node 20.19.6 fixed in 22.23.4"]);
+    assert_eq!(case("web1 host").targets, ["web1 host Brotli 1.2.0 (/opt/worker/.venv) fixed in 1.2.1"]);
+    assert_eq!(case("web1 container:edge").targets, ["web1 container:edge brotli 1.2.0-r0 fixed in 1.2.1-r0"]);
+    assert_eq!(case("web1 container:docs").title, "CVE-2026-111497: brotli 1.0.9-2+b6: no fixed release yet, in docs");
+    for c in opened.values() {
+        assert_eq!(c.split_from.as_deref(), Some("CVE-2026-111497"));
+        assert_eq!(c.fix_available, c.key != "CVE-2026-111497 @ web1 container:docs", "{}", c.key);
+        assert!(c.sources.iter().all(|s| !s.starts_with("osv:")), "no database mapped it: {:?}", c.sources);
+    }
+    // Each goes to the responder: the fixed ones to update, the one with no fix yet through triage to propose.
+    let modes: IndexMap<String, Mode> = h.responded().into_iter().skip(1).map(|(c, mode)| (c.key, mode)).collect();
+    assert_eq!(modes.len(), 8);
+    assert_eq!(modes["CVE-2026-111497 @ web1 container:docs"], Mode::Propose);
+    assert!(modes.iter().filter(|(k, _)| !k.ends_with("container:docs")).all(|(_, m)| *m == Mode::Update), "{modes:?}");
+
+    assert!(h.cycle().new_cases.is_empty(), "the same fixed releases open nothing twice");
+    assert_eq!(h.responded().len(), 9);
+
+    // Debian's fix ships later: the case that waited reopens with it.
+    split_response(&h, "CVE-2026-111497", &[r#"{"package": "Debian:brotli", "fixed": ["1.0.9-2+deb12u1"]}"#], "2026-10-23T08:00:00.000Z");
+    let summary = h.cycle();
+    assert_eq!(summary.reopened, ["CVE-2026-111497 @ web1 container:docs"]);
+    let docs = &h.cases()["CVE-2026-111497 @ web1 container:docs"];
+    assert_eq!(docs.targets, ["web1 container:docs brotli 1.0.9-2+b6 fixed in 1.0.9-2+deb12u1"]);
+    assert!(docs.reason.starts_with("fix released: 1.0.9-2+deb12u1"), "{}", docs.reason);
+    let known = h.cases()["CVE-2026-111497"].fixed_releases.clone().unwrap_or_default();
+    assert_eq!(known.len(), 6, "a later line replaces its component's, the others stay: {known:?}");
+}

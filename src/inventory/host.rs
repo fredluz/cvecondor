@@ -19,8 +19,8 @@ use regex::Regex;
 
 use super::CollectContext;
 use super::system::{
-    Base, TextSource, apk_items, dedupe, dedupe_signals, dpkg_status_items, file_signals, host_file_risk, os_item, osv_ecosystem, scan_file, scan_secrets,
-    version_of,
+    Base, TextSource, apk_items, dedupe, dedupe_signals, dist_info_items, dpkg_status_items, file_signals, host_file_risk, os_item, osv_ecosystem, scan_file,
+    scan_secrets, version_of,
 };
 use crate::config::HostCollector;
 use crate::secrets::Exposure;
@@ -195,6 +195,15 @@ pub fn collect_host(config: &HostCollector, context: &CollectContext) -> Result<
         }
     }
     let (dirs, env_files) = scan_targets(&read, &list);
+    // Python virtualenvs in the project dirs (the dir itself, `.venv`, `venv`): their packages, by directory name.
+    let mut dist_infos: Vec<String> = Vec::new();
+    for root in dirs.iter().flat_map(|d| [d.clone(), format!("{d}/.venv"), format!("{d}/venv")]) {
+        for python in list(&format!("{root}/lib")).into_iter().filter(|p| p.starts_with("python3")) {
+            let site = format!("{root}/lib/{python}/site-packages");
+            dist_infos.extend(list(&site).into_iter().filter(|n| n.ends_with(".dist-info")).map(|n| format!("{site}/{n}")));
+        }
+    }
+    items.extend(dist_info_items(dist_infos.iter().map(String::as_str), base));
     let mut files: IndexMap<String, bool> = IndexMap::new();
     for dir in &dirs {
         for name in list(dir) {
