@@ -1184,7 +1184,7 @@ mod replay_tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let state = temp_dir().expect("a temp dir");
         let env: crate::config::Env = [("CVECONDOR_STATE_DIR".to_string(), state.display().to_string())].into();
-        let config = load_config(Some(&root.join("examples/replay/config.json").display().to_string()), &env).expect("the example config loads");
+        let config = load_config(Some(&root.join("examples/replay/replay.config.json").display().to_string()), &env).expect("the example config loads");
         let opts = Opts {
             source: Some(source.into()),
             file: Some(root.join("tests/fixtures").join(file).display().to_string()),

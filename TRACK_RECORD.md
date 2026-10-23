@@ -13,7 +13,7 @@ cargo test --locked --test replay
 To see what one replay says, run it yourself against the made-up stack in `examples/replay/` (no network, nothing written outside a temp directory):
 
 ```
-cargo run --locked -- replay --config examples/replay/config.json --inventory examples/replay/inventory.json \
+cargo run --locked -- replay --config examples/replay/replay.config.json --inventory examples/replay/inventory.json \
   --source cert-eu --file tests/fixtures/cert-eu-2026-10-21.xml
 ```
 
