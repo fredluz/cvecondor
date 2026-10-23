@@ -1,0 +1,43 @@
+# /etc/systemd/system/cvecondor.service: CVECondor as a plain daemon on a Linux server.
+# What must be true:
+# - The binary at /usr/local/bin/cvecondor, built from source on this server or one like it (`cargo build --release
+#   --locked` in the checkout: Rust 1.88+ and a C compiler; or the static musl binary `scripts/release.sh` builds).
+# - A dedicated unprivileged user `cvecondor`, home /var/lib/cvecondor (the state dir lives there).
+# - /etc/cvecondor holds config.json and cvecondor.env. CVECondor loads cvecondor.env next to its config itself, so
+#   there is no EnvironmentFile here. Only the cvecondor user (and the file's owner) can read the env file: 0600
+#   owned by cvecondor, or 0640 with group cvecondor. It never sits inside the checkout.
+# - The responder (if configured) runs as this same user: its agent CLI on the PATH below, logged in as this
+#   user; git and gh, with git set to push through gh (`git config --global credential.https://github.com.helper
+#   '!gh auth git-credential'` as this user), for fix branches and pull requests.
+# - Acting on this server (updates by default; workarounds and stops only on `actOn` services): this unit stays
+#   locked down (ProtectSystem=strict, NoNewPrivileges), so the responder acts through a separate account,
+#   `cvecondor-act`, over `ssh` to localhost with a key only this user holds (~cvecondor/.ssh, the host key pinned
+#   in known_hosts). `cvecondor-act` has no password and runs privileged commands only through `sudo -n`, for: the
+#   package manager's update and upgrade, `systemctl` stop/start/restart/enable/disable/status of named units,
+#   and `docker`. Arguments are pinned wherever one could be an option or a path (`apt-get -o` and a unit file
+#   path both give root); agent/setup.md lists the rules. sudo never for a shell, an editor or `-i`. A workaround
+#   in a server config file needs that file group-writable for `cvecondor-act`, named in the runbook. Docker access
+#   is root-equivalent: that is the price of updating and stopping containers. `responder.notes` names this
+#   access ("act on <server> with `ssh <server>-act`"); agent/setup.md step 7.8 checks it.
+[Unit]
+Description=CVECondor: vulnerability and vendor-incident watch
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=cvecondor
+Group=cvecondor
+# Add the directory of the responder's agent CLI (`which <your agent>` as this user) if it isn't here.
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=CVECONDOR_CONFIG=/etc/cvecondor/config.json
+Environment=CVECONDOR_STATE_DIR=/var/lib/cvecondor/state
+ExecStart=/usr/local/bin/cvecondor run
+Restart=on-failure
+RestartSec=30
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/cvecondor
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

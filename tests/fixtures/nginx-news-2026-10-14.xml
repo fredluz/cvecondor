@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0"><channel><title>nginx news</title><link>http://nginx.org</link><item><title>nginx-1.30.6
+stable and
+nginx-1.31.7
+mainline versions have been released,
+with fixes for
+buffer overflow
+vulnerability when using alias with rewrite (CVE-2026-15176),
+buffer overflow
+vulnerability when evaluating string expressions with variables
+(CVE-2026-93479),
+request body injection
+vulnerability in HTTP/3 (CVE-2026-95101),
+session forgery
+vulnerability when using TLS session ticket key rotation (CVE-2026-97629), and
+use-after-free
+vulnerability when using ngx_http_ssi_module with AIO (CVE-2026-97205).
+</title><guid>http://nginx.org/#2026-10-14</guid><link>http://nginx.org/#2026-10-14</link><pubDate>Wed, 14 Oct 2026 00:00:00 +0300</pubDate><description><![CDATA[2026-10-14<p><a href="en/download.html">nginx-1.30.6</a>
+stable and
+<a href="en/download.html">nginx-1.31.7</a>
+mainline versions have been released,
+with fixes for
+<a href="en/security_advisories.html">buffer overflow</a>
+vulnerability when using alias with rewrite (CVE-2026-15176),
+<a href="en/security_advisories.html">buffer overflow</a>
+vulnerability when evaluating string expressions with variables
+(CVE-2026-93479),
+<a href="en/security_advisories.html">request body injection</a>
+vulnerability in HTTP/3 (CVE-2026-95101),
+<a href="en/security_advisories.html">session forgery</a>
+vulnerability when using TLS session ticket key rotation (CVE-2026-97629), and
+<a href="en/security_advisories.html">use-after-free</a>
+vulnerability when using ngx_http_ssi_module with AIO (CVE-2026-97205).
+</p>]]></description></item></channel></rss>

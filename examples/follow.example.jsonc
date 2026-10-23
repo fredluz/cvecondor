@@ -1,0 +1,39 @@
+// ~/.config/cvecondor/follow.json: what `cvecondor follow` reads on the machine you sit at.
+// It holds no secrets. Check it with `cvecondor follow --test` (sends a test line the real way).
+{
+  // Where the watcher keeps its state, as a command prefix plus the state dir that command sees.
+  // The prefix is what `deployment.md` calls the command prefix, without `cvecondor`:
+  //   a container on a server:  ["ssh", "myserver", "docker", "exec", "cvecondor"]  with stateDir "/data"
+  //   a server running systemd: ["ssh", "myserver"]                                with its state dir
+  // Leave `exec` out when the watcher runs on this machine (stateDir then defaults to the watcher's own).
+  // ssh must work without a prompt (key or agent): follow runs unattended.
+  "source": { "exec": ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "myserver", "docker", "exec", "cvecondor"], "stateDir": "/data" },
+
+  // How a line gets into your agent: pick one.
+  //
+  // 1. (default) follow starts your agent in its own tmux session, one window you can close and reattach
+  //    (`tmux -L cvecondor attach`). Each delivery is a new interactive session of your agent, started in `dir`
+  //    with the line(s) and what the agent is told as its opening message. Needs tmux (your package manager's).
+  //    `agent` is your agent CLI's command that opens an interactive session from a prompt, with {prompt} where the
+  //    opening message goes. Any agent fits; "claude", "codex" and "omp" are shorthands for ["<name>", "{prompt}"].
+  //    `dir` is the CVECondor folder you set up in with your agent (already trusted by it), so it loads AGENTS.md.
+  "agent": ["claude", "{prompt}"],
+  "dir": "~/src/cvecondor",
+  // "layout": "panes",           // where each new session goes: "panes" (a pane of one shared window, tiled; a
+  //                              // new window of the same tmux session once it holds four), "windows" (a window
+  //                              // each), or "one" (one session: later lines are typed into it)
+  // "session": "cvecondor",      // the tmux session's name
+  // "tmuxSocket": "cvecondor",   // follow's own tmux server, apart from yours
+  // "terminal": true,            // open a terminal window on the tmux session when none is attached: true (macOS
+  //                              // Terminal, or a Linux terminal found on PATH), false, or your terminal's argv
+  //                              // with {attach}: ["open", "-na", "Ghostty", "--args", "-e", "{attach}"]
+  //
+  // 2. Your own delivery command, which wins over `agent`: an agent's own "send a message to my session" command
+  //    ({line} is the line), or one that opens a pane or tab of your own terminal running your agent ({prompt} is
+  //    the opening message: the line and what the agent is told). With neither, the line goes on stdin.
+  // "deliver": ["my-agent", "send", "inbox", "{line}"],
+
+  // A desktop notification per line as well (osascript on macOS, notify-send on Linux). Default true.
+  "notification": true
+  // "pollSeconds": 60
+}

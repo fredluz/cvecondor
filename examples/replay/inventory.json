@@ -1,0 +1,33 @@
+{
+  "collectedAt": "2026-10-21T06:00:00.000Z",
+  "sources": {},
+  "items": [
+    { "host": "github", "where": "repo:acme/blog", "kind": "image", "name": "wordpress", "version": "6.8.3-php8.3-apache", "path": "docker-compose.yml" },
+    { "host": "github", "where": "repo:acme/blog", "kind": "runtime", "name": "php", "version": "8.3", "path": "docker-compose.yml" },
+    { "host": "github", "where": "repo:acme/api", "kind": "runtime", "name": "node", "version": "22.21.0", "path": "Dockerfile" },
+    { "host": "github", "where": "repo:acme/api", "kind": "package", "ecosystem": "npm", "name": "left-pad", "version": "1.0.0", "path": "package-lock.json" },
+    { "host": "github", "where": "repo:acme/api", "kind": "package", "ecosystem": "npm", "name": "right-pad", "version": "2.0.0", "path": "package-lock.json" },
+    { "host": "github", "where": "repo:acme/api", "kind": "platform", "name": "railway", "version": "-", "path": "railway.json" },
+    { "host": "github", "where": "repo:acme/worker", "kind": "package", "ecosystem": "PyPI", "name": "certifi", "version": "2026.1.4", "path": "uv.lock" },
+    { "host": "github", "where": "repo:acme/worker", "kind": "runtime", "name": "python", "version": "3.12.7", "path": ".python-version" },
+    { "host": "web1", "where": "host", "kind": "os", "name": "Ubuntu 24.04.3 LTS", "version": "24.04" },
+    { "host": "web1", "where": "host", "kind": "os-package", "ecosystem": "Ubuntu:24.04:LTS", "name": "vim", "version": "2:9.1.0016-1ubuntu7" },
+    { "host": "web1", "where": "host", "kind": "runtime", "name": "node", "version": "20.19.6", "path": "/usr/bin/node" },
+    { "host": "web1", "where": "container:blog-wordpress-1", "kind": "runtime", "name": "php", "version": "8.3.28", "running": true },
+    { "host": "web1", "where": "container:blog-wordpress-1", "kind": "image", "name": "wordpress", "version": "latest", "running": true },
+    { "host": "web1", "where": "container:api", "kind": "runtime", "name": "node", "version": "22.23.2", "running": true },
+    { "host": "web1", "where": "container:old-shop", "kind": "runtime", "name": "php", "version": "8.2.20", "running": false }
+  ],
+  "services": [
+    { "host": "web1", "where": "container:blog-wordpress-1", "state": "running", "exposed": ["blog.example.com"] },
+    { "host": "web1", "where": "container:api", "state": "running", "exposed": ["api.example.com"] },
+    { "host": "web1", "where": "container:old-shop", "state": "exited", "exposed": [] }
+  ],
+  "secrets": [
+    { "host": "web1", "where": "container:api", "location": "env", "kind": "env-var", "name": "OPENAI_API_KEY", "fingerprint": "1a2b3c4d", "exposure": "container-env", "risk": "readable via Docker", "providers": ["openai"] },
+    { "host": "github", "where": "repo:acme/api", "location": "actions", "kind": "actions-secret", "name": "RAILWAY_TOKEN", "exposure": "ci-secret", "risk": "CI secret", "providers": ["railway"] }
+  ],
+  "signals": [
+    { "host": "github", "where": "repo:acme/api", "kind": "file", "value": "railway.json" }
+  ]
+}

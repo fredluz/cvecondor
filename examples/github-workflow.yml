@@ -1,0 +1,31 @@
+# .github/workflows/cvecondor.yml in a private repo of yours (it holds the config; secrets live in the repo's
+# Actions secrets). GitHub runs schedules at best every 5 minutes and often later; for minute-level reaction
+# use the container or the daemon instead.
+name: cvecondor
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+  # Refresh soon after a lockfile change in this repo; other repos are re-read hourly via their push time.
+  push:
+    paths: ['**/package-lock.json', '**/bun.lock', '**/pnpm-lock.yaml', '**/yarn.lock', '**/uv.lock', '**/poetry.lock', '**/requirements*.txt', '**/Cargo.lock', '**/go.mod', '**/composer.lock', '**/Gemfile.lock', '**/Dockerfile*', '**/*compose*.y*ml']
+concurrency: cvecondor
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      # This repository at a commit you choose (a full commit SHA pins it; a branch follows it). The action builds
+      # CVECondor from that source once and caches the binary, so scheduled runs don't rebuild it.
+      - uses: fredluz/cvecondor@main
+        with:
+          config: .github/cvecondor.json
+          # agent: claude               # installs the responder's CLI on the runner (claude or codex)
+        env:
+          GITHUB_TOKEN: ${{ secrets.CVECONDOR_GITHUB_TOKEN }}     # fine-grained; read-only unless the responder uses it (see README)
+          CLASSIFIER_API_KEY: ${{ secrets.CLASSIFIER_API_KEY }}   # optional
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}   # whichever notifier your config uses
+          # CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}   # with agent: claude, from `claude setup-token`

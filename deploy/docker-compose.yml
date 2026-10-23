@@ -1,0 +1,50 @@
+# CVECondor on a server, covering the server itself: its packages (the host's / mounted read-only at /host)
+# and its containers (through a socket proxy that allows GET requests only, so the watcher's collectors can read
+# but never start, stop, exec or delete anything).
+#
+# Built from this checkout: `docker compose -f deploy/docker-compose.yml build` (add `--build-arg AGENT=claude` or
+# `codex` for the responder's CLI; the Dockerfile says what each adds), then `up -d`.
+#
+# Secrets: the config dir holds config.json and cvecondor.env together, outside this checkout, readable by the
+# container's user (uid 1000) and nobody else. CVECondor loads cvecondor.env from there itself: never pass it as
+# `env_file` or `environment`, which would put every secret in the container's environment (`docker inspect`
+# shows it to anyone with Docker access). Set CVECONDOR_CONFIG_DIR to that dir when running compose.
+#
+# Acting on this server (the responder: updates by default; workarounds and stops only on `actOn` services): the
+# collectors' read-only mounts stay as they are, and the responder acts through a separate host account,
+# `cvecondor-act`, over `ssh` to the host (host.docker.internal below). Its key, ssh config and pinned known_hosts
+# live in the config dir's `ssh/` (mounted read-only with it; the key readable by uid 1000 only). `cvecondor-act`
+# has no password and runs privileged commands only through `sudo -n`, for: the package manager's update and
+# upgrade, `systemctl` stop/start/restart/enable/disable/status of named units, and `docker`. Arguments are pinned
+# wherever one could be an option or a path (`apt-get -o` and a unit file path both give root); agent/setup.md
+# lists the rules. A workaround in a server config file needs that file group-writable for `cvecondor-act`, named
+# in the runbook. Docker access is root-equivalent: that is the price of updating and stopping containers.
+# `responder.notes` names this access ("act on <server> with `ssh -F /config/ssh/config <server>-act`");
+# agent/setup.md step 7.8 checks it.
+services:
+  cvecondor:
+    image: cvecondor:latest
+    container_name: cvecondor          # the docs' command prefix: `docker exec cvecondor cvecondor …`
+    build: ..
+    restart: unless-stopped
+    volumes:
+      - ${CVECONDOR_CONFIG_DIR:?set CVECONDOR_CONFIG_DIR to the config dir (config.json + cvecondor.env), outside the checkout}:/config:ro
+      - cvecondor-data:/data
+      - /:/host:ro                    # host collector: { "type": "host", "root": "/host" }
+    extra_hosts:
+      - host.docker.internal:host-gateway   # the host's sshd, for the responder's cvecondor-act account
+    depends_on: [docker-proxy]
+
+  # Docker collector endpoint: { "type": "docker", "endpoint": "tcp://docker-proxy:2375" }
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:latest
+    restart: unless-stopped
+    environment:
+      CONTAINERS: 1                   # list, inspect, archive (file reads) and logs
+      IMAGES: 1                       # image inspect (runtime versions from image env)
+      POST: 0                         # no writes of any kind
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+volumes:
+  cvecondor-data:

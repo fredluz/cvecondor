@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- ~/Library/LaunchAgents/com.cvecondor.plist: CVECondor as a user daemon on an always-on Mac.
+     Build the binary from the checkout first (`cargo install --path .` puts it in ~/.cargo/bin; Rust 1.88+);
+     replace /Users/YOU and the binary path (`which cvecondor`). Secrets: the variables your config reads go in
+     ~/.config/cvecondor/cvecondor.env (chmod 600), next to the config; CVECondor loads that file itself.
+     Load: launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.cvecondor.plist -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.cvecondor</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/YOU/.cargo/bin/cvecondor</string>
+    <string>run</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- Must reach the responder's agent CLI and gitleaks (`which <your agent> gitleaks`): often ~/.local/bin,
+         /opt/homebrew/bin on Apple silicon, /usr/local/bin on Intel. -->
+    <key>PATH</key><string>/Users/YOU/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/Users/YOU/Library/Logs/cvecondor.log</string>
+  <key>StandardErrorPath</key><string>/Users/YOU/Library/Logs/cvecondor.log</string>
+</dict>
+</plist>

@@ -1,0 +1,12 @@
+target
+tests
+test
+node_modules
+examples
+deploy
+scripts
+dist
+.git
+*.md
+!agent/respond/*.md
+!AGENTS.md

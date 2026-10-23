@@ -1,0 +1,8 @@
+CVECondor
+Copyright 2026 The CVECondor Authors
+
+This product includes software developed by The CVECondor Authors.
+
+The Docker image built from this repository also contains gitleaks
+(https://github.com/gitleaks/gitleaks), Copyright (c) 2019 Zachary Rice,
+distributed under the MIT License.

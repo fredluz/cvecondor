@@ -1,0 +1,120 @@
+# CVECondor as a scheduled GitHub Action. State (feeds seen, cases, inventory cache) persists between runs
+# in the Actions cache: each run restores the newest copy and saves its own.
+# The action builds CVECondor from its own checkout with the runner's Rust toolchain (1.88 or newer; GitHub-hosted
+# runners have one). The binary is cached, keyed on the source it was built from (Cargo.lock, src/, the briefs it
+# embeds), so a scheduled run builds only when the action's version changes; that build reuses the compiled
+# dependencies, cached on Cargo.lock.
+name: CVECondor
+description: Watch vulnerability feeds and vendor incidents against your GitHub repos; notify and respond.
+inputs:
+  config:
+    description: Path to the config file in the calling repo
+    default: .github/cvecondor.json
+  agent:
+    description: >-
+      The responder's agent CLI to install on the runner: `claude` or `codex` (from npm; the runner has Node), with
+      git set to push through gh, so a GH_TOKEN in `responder.env` is its git login. Empty (the default): none is
+      installed; a config with a responder then needs its CLI installed by an earlier step of your workflow.
+    default: ''
+runs:
+  using: composite
+  steps:
+    - name: Install gitleaks (secret detection)
+      shell: bash
+      run: |
+        set -euo pipefail
+        v=8.30.1; cd "$RUNNER_TEMP"
+        case "$RUNNER_OS/$RUNNER_ARCH" in
+          Linux/X64) a=linux_x64 ;; Linux/ARM64) a=linux_arm64 ;; macOS/ARM64) a=darwin_arm64 ;; macOS/X64) a=darwin_x64 ;;
+          *) echo "::warning::no gitleaks build for $RUNNER_OS/$RUNNER_ARCH: secret scanning skipped"; exit 0 ;;
+        esac
+        curl -sSfLO "https://github.com/gitleaks/gitleaks/releases/download/v$v/gitleaks_${v}_${a}.tar.gz"
+        curl -sSfLO "https://github.com/gitleaks/gitleaks/releases/download/v$v/gitleaks_${v}_checksums.txt"
+        grep " gitleaks_${v}_${a}.tar.gz\$" "gitleaks_${v}_checksums.txt" | shasum -a 256 -c -
+        tar -xzf "gitleaks_${v}_${a}.tar.gz" gitleaks && echo "GITLEAKS_BIN=$RUNNER_TEMP/gitleaks" >> "$GITHUB_ENV"
+    - name: Hash the source
+      id: source
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        hash() { shasum -a 256 | cut -c1-24; }
+        echo "tree=$(find Cargo.toml Cargo.lock AGENTS.md agent/respond src -type f -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256 | hash)" >> "$GITHUB_OUTPUT"
+        echo "lock=$(hash < Cargo.lock)" >> "$GITHUB_OUTPUT"
+    - name: Restore the built binary
+      id: binary
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ runner.temp }}/cvecondor-bin
+        key: cvecondor-bin-${{ runner.os }}-${{ runner.arch }}-${{ steps.source.outputs.tree }}
+    - name: Restore compiled dependencies
+      id: deps
+      if: steps.binary.outputs.cache-hit != 'true'
+      uses: actions/cache/restore@v4
+      with:
+        path: |
+          ~/.cargo/registry/index
+          ~/.cargo/registry/cache
+          ${{ runner.temp }}/cvecondor-target
+        key: cvecondor-deps-${{ runner.os }}-${{ runner.arch }}-${{ steps.source.outputs.lock }}
+    - name: Build cvecondor
+      if: steps.binary.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        cargo build --release --locked --manifest-path "$ACTION_PATH/Cargo.toml" --target-dir "$RUNNER_TEMP/cvecondor-target"
+        mkdir -p "$RUNNER_TEMP/cvecondor-bin"
+        cp "$RUNNER_TEMP/cvecondor-target/release/cvecondor" "$RUNNER_TEMP/cvecondor-bin/cvecondor"
+    - name: Save compiled dependencies
+      if: steps.binary.outputs.cache-hit != 'true' && steps.deps.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: |
+          ~/.cargo/registry/index
+          ~/.cargo/registry/cache
+          ${{ runner.temp }}/cvecondor-target
+        key: cvecondor-deps-${{ runner.os }}-${{ runner.arch }}-${{ steps.source.outputs.lock }}
+    - name: Save the built binary
+      if: steps.binary.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ runner.temp }}/cvecondor-bin
+        key: cvecondor-bin-${{ runner.os }}-${{ runner.arch }}-${{ steps.source.outputs.tree }}
+    - name: Put cvecondor on PATH
+      shell: bash
+      run: |
+        echo "$RUNNER_TEMP/cvecondor-bin" >> "$GITHUB_PATH"
+        "$RUNNER_TEMP/cvecondor-bin/cvecondor" --version
+    - name: Install the responder's agent CLI
+      if: inputs.agent != ''
+      shell: bash
+      env:
+        AGENT: ${{ inputs.agent }}
+      run: |
+        set -euo pipefail
+        case "$AGENT" in
+          claude) npm install -g --omit=dev @anthropic-ai/claude-code ;;
+          codex) npm install -g --omit=dev @openai/codex ;;
+          *) echo "::error::agent: claude or codex; install any other CLI in an earlier step and leave agent empty"; exit 1 ;;
+        esac
+        git config --global credential.https://github.com.helper '!gh auth git-credential'
+    - name: Restore state
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ runner.temp }}/cvecondor-state
+        key: cvecondor-state-${{ github.run_id }}
+        restore-keys: cvecondor-state-
+    - name: Cycle
+      shell: bash
+      env:
+        CVECONDOR_STATE_DIR: ${{ runner.temp }}/cvecondor-state
+        CONFIG: ${{ inputs.config }}
+      run: cvecondor cycle --config "$CONFIG"
+    - name: Save state
+      if: always()
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ runner.temp }}/cvecondor-state
+        key: cvecondor-state-${{ github.run_id }}

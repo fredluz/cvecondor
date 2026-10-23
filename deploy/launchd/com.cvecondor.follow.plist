@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- ~/Library/LaunchAgents/com.cvecondor.follow.plist: `cvecondor follow` on the Mac you sit at. It reads the
+     watcher's new urgent lines (wherever the watcher runs) and starts a session of your agent for each.
+     Replace /Users/YOU and the binary path (`which cvecondor`). PATH must reach the binaries it starts:
+     tmux, your agent CLI (`which <your agent>`: often ~/.local/bin, /opt/homebrew/bin on Apple silicon,
+     /usr/local/bin on Intel) and ssh. The settings are in
+     ~/.config/cvecondor/follow.json (examples/follow.example.jsonc); no secrets are needed here.
+     Load:   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.cvecondor.follow.plist
+     Test:   cvecondor follow --test
+     The first time it opens a Terminal window or a notification, macOS asks once to let it control Terminal /
+     show notifications: allow it. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.cvecondor.follow</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/cvecondor</string>
+    <string>follow</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/Users/YOU/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>30</integer>
+  <key>StandardOutPath</key><string>/Users/YOU/Library/Logs/cvecondor-follow.log</string>
+  <key>StandardErrorPath</key><string>/Users/YOU/Library/Logs/cvecondor-follow.log</string>
+</dict>
+</plist>
