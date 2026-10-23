@@ -15,7 +15,7 @@ use indexmap::IndexMap;
 use serde_json::Value;
 
 use crate::feeds::ProseItem;
-use crate::matching::{Severity, bucket, label, product_terms};
+use crate::matching::{Severity, bucket, carrier_terms, label, product_terms};
 use crate::types::{Inventory, InventoryItem, ItemKind};
 use crate::versions::{compare_loose, satisfies};
 
@@ -361,7 +361,8 @@ fn is_package(entry: &AffectedEntry, item: &InventoryItem) -> bool {
 pub struct Matched {
     /// Items a readable range puts in the affected versions, each with the releases that fix it.
     pub affected: Vec<(InventoryItem, Vec<String>)>,
-    /// Items of a product the record names where no range settles it: the name-match + classifier path.
+    /// Items of a product the record names where no range settles it, and items that carry the library it names
+    /// built in: the name-match + classifier path, or riders on the case the affected items open.
     pub candidates: Vec<InventoryItem>,
     /// The inventory's words for the products matched.
     pub terms: Vec<String>,
@@ -379,6 +380,7 @@ pub fn match_record(record: &CveRecord, inventory: &Inventory) -> Matched {
             list.push(item);
         }
     }
+    let carriers = carrier_terms(inventory);
     let mut matched = Matched::default();
     let mut verdicts: Vec<(&InventoryItem, Reading)> = Vec::new();
     let mut terms: IndexMap<String, ()> = IndexMap::new();
@@ -398,6 +400,13 @@ pub fn match_record(record: &CveRecord, inventory: &Inventory) -> Matched {
             }
             let reading = comparable(item).map_or(Reading::Undecided, |v| read_entry(entry, &v));
             verdicts.push((item, reading));
+        }
+        // What carries the library built in has its own versions: the library's range never settles it.
+        for (library, items) in &carriers {
+            if !entry.product.is_empty() && is_product(&entry.product, library) {
+                terms.insert(library.clone(), ());
+                verdicts.extend(items.iter().map(|i| (*i, Reading::Undecided)));
+            }
         }
     }
     for (item, reading) in verdicts {

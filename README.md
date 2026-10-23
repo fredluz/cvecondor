@@ -16,10 +16,11 @@ CVECondor tells you when something you run becomes vulnerable, before you read a
 
 **Don't take our word for it: point your own agent at this repository.** It reads every file, `TRACK_RECORD.md` included (what CVECondor has fixed, and how to check it yourself), and can tell you what CVECondor does, then set it up for you (see "Quick start" below).
 
-- **Watch.** Every few minutes it polls public sources: CISA's exploited list, the CVE List (every new and updated CVE record), CERT-EU, OSV (GitHub advisories, PyPI, npm, distro trackers, malicious packages), the Node, PHP and Python security announcements, Mozilla's CA incidents, your vendors' status pages and security bulletins, and general security news. Unchanged feeds cost one `304`. No model runs while nothing new matches.
+- **Watch.** Every few minutes it polls public sources: CISA's exploited list, the CVE List (every new and updated CVE record), CERT-EU, OSV (GitHub advisories, PyPI, npm, distro trackers, malicious packages), the Node, PHP and Python security announcements, Bun's releases, Mozilla's CA incidents, your vendors' status pages and security bulletins, and general security news. Unchanged feeds cost one `304`. No model runs while nothing new matches.
 - **Match.** It matches the advisories against an inventory of what you run:
   - your GitHub repos: lockfiles, manifests, Dockerfile and compose base images, runtime version files;
-  - optionally your servers: host packages, containers, their OS packages and runtimes.
+  - optionally your servers: host packages, containers, their OS packages and runtimes, Python virtualenvs.
+  - What carries a library built in (Node and Bun carry Brotli and zlib, Python wheels carry OpenSSL or libxml2) is matched when an advisory names the library. When the sources name fixed releases before OSV maps every ecosystem, your agent reads them per component and the watcher opens one case per place from them, each with the release it moves to.
   - It also matches vendor incidents (a hosting platform breach has no CVE) against the vendors it detects you use: their own feeds, and news whose headline names them. With a responder, your agent confirms a vendor incident and your exposure before anything is pushed.
 - **Secrets.** It points out secrets that could be compromised: committed `.env` files and credential files in repos, world-readable env files on servers, tokens printed in container logs. When a vendor or a place is hit, it lists which of your keys and env vars live there and need rotating. It shows names, places and an 8-hex fingerprint, never values, and it never rotates anything itself.
 - **Rate it for you.** Every case and the install baseline say how serious it is *for you*, not just the CVSS label: **act today**, **act this week**, **plan it**, or **not a real risk for you**, with one line of why (exploited in the wild, running, publicly reachable, what is at stake).
@@ -101,7 +102,7 @@ replay --source ID --file F [--only TEXT] [--inventory FILE] [--respond]
 respond KEY [--mode propose|update|act]
                     run the responder on one case now (a lower-severity case, or a mode you choose; failed runs retry by themselves)
 record KEY --file REPORT
-                    record a case handled in conversation: its report, and what it waits for (fix tracking)
+                    record a case handled in conversation: its report, what it waits for (fix tracking), and the fixed releases it names
 follow [--once | --test] [--config FILE]
                     on your own machine: each urgent line from the watcher opens a session of your agent
 ```
@@ -144,10 +145,10 @@ Collectors (all read-only):
   - **Scans for secrets:** committed env and credential-prone files, with gitleaks.
   - **Cost:** unchanged repos cost no requests beyond the repo list (image env: none inside 24 hours).
 - **`host`** (a Linux server; on a Mac, use `github` and `docker`): `name` (how messages name the server, e.g. `web1`), `root` (`/`, or `/host` from a container), `binaries`.
-  - **Reads:** the dpkg or apk database and runtime versions.
+  - **Reads:** the dpkg or apk database, runtime versions, and the packages of Python virtualenvs in those project dirs (the dir itself, `.venv`, `venv`; names and versions from `*.dist-info`).
   - **Scans for secrets:** compose and `.env` files under systemd working dirs, `/opt`, `/srv`, `/home/*/*` and `/root/*` (names and fingerprints only; world-readable files are flagged).
 - **`docker`**: `name`, `endpoint` (`unix://`, `tcp://`, `https://` with `tls`), `exec` (off).
-  - **Reads (GET only):** per container, its OS packages and the lockfiles in its working directory through the archive API (stopped containers too), runtime versions from image env, published ports and `VIRTUAL_HOST`.
+  - **Reads (GET only):** per container, its OS packages and the lockfiles in its working directory through the archive API (stopped containers too), runtime versions from image env (or, for an official runtime image that sets none, such as `oven/bun`, the version its tag names), published ports and `VIRTUAL_HOST`.
   - **Scans for secrets:** env secrets (names and fingerprints), and log tails.
 - **`ssh`**: `host`, `port`, `identityFile`, `sshOptions`, `sudo`, `docker`, `timeoutSeconds`.
   - **Access:** `sudo: true` runs the reads through `sudo -n`, so its rule needs `cat`, `find`, `stat` and `sed` (and `docker` with `docker: true`); version probes run without sudo. A refused `docker ps` is a warning on the collector, not an empty server.
@@ -172,7 +173,9 @@ What it covers and what it doesn't is listed in the next section.
 - Ubuntu, Debian and Alpine packages on hosts and in containers.
 - Node by semver from the Node security index.
 - Product CVEs from the CVE List ([cvelistV5](https://github.com/CVEProject/cvelistV5)), by version: PHP, nginx, appliances and anything outside OSV's ecosystems, as long as the record gives a version range for a runtime, image or package you run. Records that only name a product (free-text or git/rpm versions) go through the name match and classifier like a prose advisory, never straight to a case. A CVE another source already opened joins that case. CISA's ADP container in the record adds severity and "exploited". Cost: one conditional Range request on `cves/deltaLog.json` (the repository's log of every publisher run, newest first, 30 MB: only its first bytes are read; a `304` when no run happened, a few KB otherwise), then each changed record's own file (about 9 KB, at most 300 per poll; the rest wait for the next poll). The first read only records where the log stands. A distro's own package (Debian, Ubuntu, Alpine) is judged from OSV, because upstream ranges ignore backported fixes; the CVE List only makes it a candidate for the classifier.
-- PHP, Python and Bun announcements, and CERT-EU and CISA KEV by product name.
+- PHP, Python and Bun announcements, and CERT-EU and CISA KEV by product name. A Bun release whose notes name a security fix counts as one, as Node's and PHP's posts do.
+- Libraries that runtimes and packages carry built in (Brotli, zlib, zstd, OpenSSL, SQLite, V8, … in Node, Bun, Deno and Python and npm binary packages; the table is `BUNDLED` in `src/matching.rs`): an advisory or CVE record naming the library reaches what carries it, marked `bundles <library>`, as well as the library's own distro package.
+- Fixed releases named before every database maps them. The CVE record, a vendor's release notes and the news name fixed versions days before OSV maps each ecosystem. The responder reads them per component (each runtime's release lines, each language package, each distro's own package) and takes the `split` path; the watcher then opens one case per place, each showing the release it moves to, a separate "move to a supported line" case for a line that gets no fix, and no case for what is already on a fixed release. It keeps matching them every cycle, so what is deployed later is found too.
 - CA compromises (all TLS clients).
 - Malicious packages.
 - Incidents at about 160 catalogued vendors (hosting, clouds, GPU/model hosting, AI APIs, databases, auth, payments, email, observability, CI, secret managers), when you use them. An item about a vendor comes from its own feeds or a news headline that names it; one whose headline is a CVE is a product advisory, left to the CVE List and OSV. With a responder, every vendor case goes to it first: it reads the sources and checks your exposure, and only it sends an urgent line. Without one, a classifier-confirmed incident with keys of yours stored there is Act today. The keys listed are the vendor's own, the CI secrets and secret-named env vars of places that deploy on it, and the rotation map's.
@@ -186,6 +189,7 @@ What it covers and what it doesn't is listed in the next section.
 - Git history (a secret committed and later deleted is not searched for).
 - A standing exposure map: the responder checks exposure itself when a case runs.
 - Application-level versions inside images (WordPress core, plugins, themes): only the image's OS packages, runtimes and lockfiles are read.
+- Python virtualenvs inside containers: only the lockfiles in the working directory, and with `exec` on, the system interpreter's `pip list`.
 
 ## Design: code for the always-on part, prompts for judgment
 
@@ -201,7 +205,7 @@ It runs no model, except classifier.dev as an optional cheap filter for prose.
 **Prompts run by your own agent** carry everything that needs judgment:
 - `AGENTS.md`: the agent in charge. It knows the tool, the files, the state, and how to check, explain, change and handle things.
 - `agent/setup.md`, its first job: finding your repos, servers, vendors and their feeds, building the rotation map and runbooks, and choosing what may act.
-- `agent/respond/`: one case. `triage.md` comes first (the advisory at its sources, whether a fix is released, whether it is exploitable on your system, the rating, the path); then one brief per path: `update`, `not-exploitable`, `workaround`, `shutdown`, `propose`, `breach`, `distrust`. `common.md` holds what every path shares: subagents, telling you as it goes, how it reaches servers, pull requests never merged by the responder, no secret ever shown, waits and the report.
+- `agent/respond/`: one case. `triage.md` comes first (the advisory at its sources, whether a fix is released, whether it is exploitable on your system, the rating, the path); then one brief per path: `update`, `not-exploitable`, `workaround`, `shutdown`, `propose`, `breach`, `distrust`. Its `split` path writes, per component, the fixed releases the sources name, and the watcher opens the cases from them. `common.md` holds what every path shares: subagents, telling you as it goes, how it reaches servers, pull requests never merged by the responder, no secret ever shown, waits and the report.
 
 The watcher's own rating of each case is a first guess from what it can see (exploited, running, exposed, at stake). The responder replaces it.
 

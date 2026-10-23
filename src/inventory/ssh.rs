@@ -18,8 +18,8 @@ use regex::Regex;
 use super::CollectContext;
 use super::host::{HOST_BINARIES, basename, runtime_name};
 use super::system::{
-    Base, ContainerInput, ContainerInspect, LOG_RISK, TextSource, apk_items, container_inventory, dedupe, dedupe_signals, dpkg_query_items, file_signals,
-    host_file_risk, os_item, osv_ecosystem, scan_file, scan_secrets, sections, version_of,
+    Base, ContainerInput, ContainerInspect, LOG_RISK, TextSource, apk_items, container_inventory, dedupe, dedupe_signals, dist_info_items, dpkg_query_items,
+    file_signals, host_file_risk, os_item, osv_ecosystem, scan_file, scan_secrets, sections, version_of,
 };
 use crate::config::SshCollector;
 use crate::manifests::LOCKFILES;
@@ -95,6 +95,10 @@ const SCRIPT_FIND_HOME: &str = r##" 2>/dev/null
 const SCRIPT_TAIL: &str = r##" 2>/dev/null; } | sort -u | while read f; do
   m=$($SU stat -c %a "$f" 2>/dev/null) && { S "file $m $f"; $SU cat "$f" 2>/dev/null | B 1000000; }
 done
+S venvs
+{ printf '%s\n' "$DIRS"; $SU find /opt /srv /root -mindepth 1 -maxdepth 1 -type d 2>/dev/null; $SU find /home -mindepth 2 -maxdepth 2 -type d 2>/dev/null; } | sort -u | while read d; do
+  [ -n "$d" ] && $SU find "$d" -maxdepth 5 \( -name node_modules -o -name .git \) -prune -o -type d -name '*.dist-info' -path '*/lib/python3*/site-packages/*' -print -prune 2>/dev/null
+done | B 2000000
 S end
 "##;
 
@@ -147,6 +151,7 @@ pub fn parse_ssh(host: &str, output: &str) -> Result<ParsedSsh> {
     items.push(base.item(ItemKind::Os, "linux kernel", if kernel.is_empty() { "unknown" } else { kernel }));
     items.extend(dpkg_query_items(body("dpkg"), pkg_base));
     items.extend(apk_items(body("apk"), pkg_base));
+    items.extend(dist_info_items(body("venvs").split('\n'), base));
     for line in body("hostbin").split('\n') {
         let mut fields = line.split('\t');
         let (path, text) = (fields.next().unwrap_or_default(), fields.next().unwrap_or_default());

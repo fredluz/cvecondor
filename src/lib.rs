@@ -24,6 +24,7 @@ pub mod secrets;
 pub mod state;
 pub mod types;
 pub mod util;
+pub mod upstream;
 pub mod vendors;
 pub mod versions;
 pub mod watch;

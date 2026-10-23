@@ -14,7 +14,7 @@ use indexmap::{IndexMap, IndexSet};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-use crate::manifests::parse_lockfile;
+use crate::manifests::{image_runtimes, parse_lockfile};
 use crate::secrets::{Exposure, GitleaksMissing, SecretFinding, env_secrets, is_env_file, providers_of, scan_text};
 use crate::types::{Collected, InventoryItem, ItemKind, ServiceInfo, VendorSignal, VendorSignalKind};
 use crate::util::{js_regex, js_trim};
@@ -256,6 +256,29 @@ pub fn env_runtimes<'a>(env: impl IntoIterator<Item = &'a str>, base: Base) -> V
         let name = if &m[1] == "GOLANG" { "go".to_string() } else { m[1].to_lowercase() };
         let mut item = base.item(ItemKind::Runtime, name, version);
         item.path = Some(format!("env:{}_VERSION", &m[1]));
+        out.push(item);
+    }
+    out
+}
+
+/// Python virtualenvs a server's project dirs hold: `<root>/lib/python3*/site-packages/<name>-<version>.dist-info`
+/// directory paths → PyPI packages, each with its venv root as `path`. Read from the directory names only.
+pub fn dist_info_items<'a>(paths: impl IntoIterator<Item = &'a str>, base: Base) -> Vec<InventoryItem> {
+    let mut out = Vec::new();
+    for path in paths {
+        let path = js_trim(path).trim_end_matches('/');
+        let Some((root, rest)) = path.split_once("/lib/python") else { continue };
+        let Some(stem) = rest.rsplit('/').next().and_then(|d| d.strip_suffix(".dist-info")) else { continue };
+        if !rest.contains("/site-packages/") {
+            continue;
+        }
+        let Some((name, version)) = stem.rsplit_once('-') else { continue };
+        if name.is_empty() || !version.starts_with(|c: char| c.is_ascii_digit()) {
+            continue;
+        }
+        let mut item = base.item(ItemKind::Package, name, version);
+        item.ecosystem = Some("PyPI".to_string());
+        item.path = Some(root.to_string());
         out.push(item);
     }
     out
@@ -522,6 +545,14 @@ pub fn container_inventory(host: &str, c: &ContainerInspect, input: &ContainerIn
     items.extend(apk_items(files.get(CONTAINER_FILES.apk).map_or("", String::as_str), pkg_base));
     items.extend(env_runtimes(kept.iter().copied().chain(kept_env(input.image_env.as_deref())), base));
     items.extend(probe_items(input.probe.as_deref().unwrap_or(""), base));
+    // An official runtime image that declares no version in its env (`oven/bun`): the version its tag names.
+    for (name, version) in image_runtimes(&c.config.image) {
+        if !items.iter().any(|i| i.kind == ItemKind::Runtime && i.name == name) {
+            let mut item = base.item(ItemKind::Runtime, name, version);
+            item.path = Some(format!("image tag: {}", c.config.image));
+            items.push(item);
+        }
+    }
     for (path, text) in files {
         if path == CONTAINER_FILES.dpkg || path == CONTAINER_FILES.apk || CONTAINER_FILES.os_release.contains(&path.as_str()) {
             continue;

@@ -85,7 +85,8 @@ pub static SOURCES: LazyLock<Vec<SourceDef>> = LazyLock::new(|| {
         SourceDef { min_minutes: Some(10), ..high("php-news", "https://www.php.net/feed.atom", SourceKind::Prose) },
         // nginx.org's news: security releases name the product only as `nginx-1.31.7`.
         SourceDef { min_minutes: Some(15), ..high("nginx-news", "https://nginx.org/index.rss", SourceKind::Prose) },
-        SourceDef::new("bun-releases", "https://github.com/oven-sh/bun/releases.atom", SourceKind::Prose),
+        // Bun's own releases: one whose notes pass the security keywords is a security release of what you run.
+        high("bun-releases", "https://github.com/oven-sh/bun/releases.atom", SourceKind::Prose),
         SourceDef { min_minutes: Some(15), ..high("python-blog", "https://blog.python.org/feeds/posts/default", SourceKind::Prose) },
         // CA incidents (key compromise, distrust) are not CVEs; Mozilla's CA Program bugs carry them first.
         secure(

@@ -30,6 +30,7 @@ use crate::fixes::parse_waits;
 use crate::name::{ENV_PREFIX, NAME};
 use crate::notify::{Notice, Notifier};
 use crate::state::{read_state, slug, write_file_atomic, write_state};
+use crate::upstream::parse_fixed;
 use crate::util::{self, iso};
 use crate::watch::{Case, ResponseRecord, ResponseState, Triage, TriagePath, final_rating, read_responses};
 
@@ -595,6 +596,7 @@ pub fn start_response_with(config: &Config, c: &Case, case_file: &Path, mode: Mo
         finished_at: None,
         report: None,
         waits: None,
+        fixed: None,
         triage: None,
         error: None,
         pid: None,
@@ -734,6 +736,7 @@ impl Job {
         record.finished_at = Some(iso(util::now()));
         record.report = c.report.clone();
         record.waits = Some(parse_waits(&report));
+        record.fixed = Some(parse_fixed(&report));
         record.triage = triage.clone();
         if !ok {
             let program = self.argv.first().map_or("", String::as_str);
@@ -900,6 +903,7 @@ mod tests {
             finished_at: None,
             report: None,
             waits: None,
+            fixed: None,
             triage: None,
             error: None,
             pid: Some(u32::MAX - 1),
