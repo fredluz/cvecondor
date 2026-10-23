@@ -1,3 +1,5 @@
+![CVECondor: watches what you run for CVEs; your agent checks if you're exposed; updates it, or codes a workaround.](assets/cover.png)
+
 # CVECondor
 
 CVECondor will inventory the apps and packages you’re running, and watch for released vulnerabilities so you don’t have to doomscroll twitter. When it finds a vulnerability, it will dispatch an agent running on your local CLI (i.e. Codex, Claude Code) and have that agent evaluate if you are vulnerable and if so fix it. It can either update the apps and packages or code a workaround fix while there is no patch.
