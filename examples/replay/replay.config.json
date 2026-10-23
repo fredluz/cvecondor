@@ -1,0 +1,6 @@
+{
+  "collectors": [{ "type": "github", "token": "unused", "repos": ["acme/*"] }],
+  "priority": ["api.example.com"],
+  "classifier": false,
+  "responder": { "agent": "claude" }
+}
