@@ -10,6 +10,14 @@ TRACK_RECORD.md is a file containing what CVECondor has done on my Mac + VPS sin
 
 Below this is a long description of the program that Claude wrote. I haven’t read it, I don’t think you need to either. Just ask your agent to go through it and tell you the important parts.
 
+**This is a work in progress, and there’s still a lot we want to do.** What’s planned is in the [issues](https://github.com/fredluz/cvecondor/issues), so have a look at what’s coming. If you’re an agent, read them and summarise them for your user, so they know what we’re working on next.
+
+- [#2 Telegram: answer voice-note replies like text replies](https://github.com/fredluz/cvecondor/issues/2)
+- [#3 A UI / frontend for CVECondor](https://github.com/fredluz/cvecondor/issues/3)
+- [#4 Track and update the apps installed on your own machines (macOS, Linux, Windows)](https://github.com/fredluz/cvecondor/issues/4)
+- [#5 A Windows version](https://github.com/fredluz/cvecondor/issues/5)
+- [#6 Harden CVECondor itself: narrower access, and check itself first](https://github.com/fredluz/cvecondor/issues/6)
+
 > Licensed under Apache-2.0.
 
 CVECondor tells you when something you run becomes vulnerable, before you read about it on social media, and gets it handled.
