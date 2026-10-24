@@ -54,14 +54,14 @@ The split you work within:
 | | |
 |---|---|
 | `agent/setup.md` | Setting up: discovery, vendors, questions for the user, config, first cycle. |
-| `docs/telegram.md` | Setting up Telegram: the user creates a bot in @BotFather, the token goes into the env file unseen, you find the chat id, test an urgent line and a reply. What replies handle (text only). |
+| `docs/telegram.md` | Setting up Telegram: the user creates a bot in @BotFather, the token goes into the env file unseen, `cvecondor telegram-chat` finds the chat id and writes it into the config, then you test an urgent line and a reply. What replies handle (text only; voice is [issue #2](https://github.com/fredluz/cvecondor/issues/2)). |
 | `agent/respond/` | Handling one case: `triage.md` first (facts, fix released, exploitable here, rating, path), then one file per path; `common.md` for the shared rules (subagents, telling the user, PRs, secrets, waits, the report). |
 | `src/follow.rs` | `cvecondor follow`: runs on the user's own machine, reads the watcher's urgent lines, starts a session of their agent for each, as panes of one shared tmux window by default (README, "Follow"). |
 | `README.md` | What CVECondor does, ways to run it, and the **config reference** (every field). |
 | [GitHub issues](https://github.com/fredluz/cvecondor/issues) | What is planned and not built yet. When the user asks what is missing or what comes next, or when first explaining CVECondor to them, read the open issues (`gh issue list --repo fredluz/cvecondor`) and summarise them. |
 | `examples/config.example.jsonc` | An annotated config. |
 | `deploy/` | systemd unit, launchd plist, docker compose. `action.yml` + `examples/github-workflow.yml`: the GitHub Action. |
-| `src/` (Rust) | `watch.rs` (the cycle, cases, rating), `feeds.rs` (sources), `matching.rs` (OSV, Node index, prose, libraries runtimes and packages bundle), `cvelist.rs` (CVE List records: read, matched by version), `upstream.rs` (fixed releases named upstream, matched per component and release line), `inventory/` (collectors: `github`, `host`, `docker`, `ssh`), `secrets.rs` (gitleaks), `vendors.rs` + `vendors/catalog.rs` (vendor detection and feeds), `fixes.rs` (what a case waits for), `responder.rs` (runs the user's CLI), `relay.rs` (Telegram replies to you), `notify.rs`, `inbox.rs`, `config.rs`, `cli.rs`. |
+| `src/` (Rust) | `watch.rs` (the cycle, cases, rating), `feeds.rs` (sources), `matching.rs` (OSV, Node index, prose, libraries runtimes and packages bundle), `cvelist.rs` (CVE List records: read, matched by version), `upstream.rs` (fixed releases named upstream, matched per component and release line), `inventory/` (collectors: `github`, `host`, `docker`, `ssh`), `secrets.rs` (gitleaks), `vendors.rs` + `vendors/catalog.rs` (vendor detection and feeds), `fixes.rs` (what a case waits for), `responder.rs` (runs the user's CLI), `relay.rs` (Telegram replies to you), `telegram.rs` (`telegram-chat`: finds the chat id, writes it into the config), `notify.rs`, `inbox.rs`, `config.rs`, `cli.rs`. |
 
 **Config dir** (`~/.config/cvecondor/` unless `deployment.md` says otherwise):
 - `config.json`;
