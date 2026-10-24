@@ -17,6 +17,7 @@ Below this is a long description of the program that Claude wrote. I haven’t r
 - [#4 Track and update the apps installed on your own machines (macOS, Linux, Windows)](https://github.com/fredluz/cvecondor/issues/4)
 - [#5 A Windows version](https://github.com/fredluz/cvecondor/issues/5)
 - [#6 Harden CVECondor itself: narrower access, and check itself first](https://github.com/fredluz/cvecondor/issues/6)
+- [#7 A token counter: how many tokens CVECondor's agent runs use, on the server and on your own machine](https://github.com/fredluz/cvecondor/issues/7)
 
 > Licensed under Apache-2.0.
 
