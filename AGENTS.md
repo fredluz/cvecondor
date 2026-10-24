@@ -54,6 +54,7 @@ The split you work within:
 | | |
 |---|---|
 | `agent/setup.md` | Setting up: discovery, vendors, questions for the user, config, first cycle. |
+| `docs/telegram.md` | Setting up Telegram: the user creates a bot in @BotFather, the token goes into the env file unseen, you find the chat id, test an urgent line and a reply. What replies handle (text only). |
 | `agent/respond/` | Handling one case: `triage.md` first (facts, fix released, exploitable here, rating, path), then one file per path; `common.md` for the shared rules (subagents, telling the user, PRs, secrets, waits, the report). |
 | `src/follow.rs` | `cvecondor follow`: runs on the user's own machine, reads the watcher's urgent lines, starts a session of their agent for each, as panes of one shared tmux window by default (README, "Follow"). |
 | `README.md` | What CVECondor does, ways to run it, and the **config reference** (every field). |

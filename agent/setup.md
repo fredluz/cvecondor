@@ -213,16 +213,7 @@ Prove it in step 7 with one propose-only response.
 
 Walk them through each channel they agree to. Each secret goes in the env file through the recipe; the config holds only `${NAME}` references and the non-secret ids. Fields are in the README's config reference.
 
-- **Telegram** (`{ "type": "telegram", "botToken": "${TELEGRAM_BOT_TOKEN}", "chatId": "<id>" }`):
-  1. In Telegram, they open a chat with **@BotFather**, send `/newbot`, and pick a display name and a username ending in `bot`. BotFather replies with the bot's token.
-  2. They run the env-file recipe with `NAME` = `TELEGRAM_BOT_TOKEN`.
-  3. They open a chat with their new bot and send it any message (a bot can't message someone who hasn't written to it first). For a group, they add the bot to the group and send a message there.
-  4. You find the chat id, reading the token from the env file so it never appears:
-     ```sh
-     bash -c 'set -a; . <config dir>/cvecondor.env; curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates"' | jq '.result[].message.chat | {id, type, title, username}'
-     ```
-     A private chat's id is a positive number; a group's is negative. Use a new bot for CVECondor: if the bot is already used by another program that polls it, `getUpdates` returns a conflict, and the id has to come from that program or from them.
-  5. **Replies** (optional, needs a responder): with `"replies": true` on this notifier, CVECondor reads the bot's messages from that chat and hands each to you, the agent in charge, run headless with the responder's `act` command; your answer goes back to the chat. The bot must be CVECondor's alone: it is the only reader.
+- **Telegram** (`{ "type": "telegram", "botToken": "${TELEGRAM_BOT_TOKEN}", "chatId": "<id>" }`, plus `"replies": true` to let them answer there; replies need a responder): follow **`docs/telegram.md`**. It has the user create a bot of their own in @BotFather, takes the token through the env-file recipe, finds the chat id for you from `getUpdates`, then tests an outgoing line and a reply. The user only creates the bot, taps Start and sends a test message. Voice messages get no answer; they type.
 - **Slack** (`{ "type": "slack", "webhookUrl": "${SLACK_WEBHOOK_URL}" }`): at `https://api.slack.com/apps` → **Create New App** → **From scratch** (name `cvecondor`, their workspace) → **Incoming Webhooks** → turn it on → **Add New Webhook to Workspace** → pick the channel → **Allow**. They copy the webhook URL (it is the secret) and run the recipe with `NAME` = `SLACK_WEBHOOK_URL`. A workspace may require an admin to approve the app.
 - **Email** (`{ "type": "email", "host", "port", "security", "user", "pass": "${SMTP_PASSWORD}", "from", "to" }`): ask for their provider's SMTP host and port (587 with `starttls`, or 465 with `tls`) and the sending address. Only the password is a secret; it goes in through the recipe with `NAME` = `SMTP_PASSWORD`. With Gmail or Google Workspace that is an app password (Google Account → Security → 2-Step Verification on → **App passwords**), not their account password; Microsoft 365 and Fastmail have the same idea. A transactional sender (Postmark, Resend, SES) gives SMTP credentials too.
 - **Webhook** (`{ "type": "webhook", "url": "${WEBHOOK_URL}", "headers": { "Authorization": "Bearer ${WEBHOOK_TOKEN}" } }`): any endpoint that accepts a JSON POST (ntfy, Discord's webhook URL, their own service). The URL, and a token if it needs one, go through the recipe.

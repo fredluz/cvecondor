@@ -85,7 +85,7 @@
   // agent reads (`cvecondor inbox`). A channel your agent reads can also get "case" (cycle summaries), "report"
   // (responder results) and "secrets".
   "notify": [
-    { "type": "telegram", "botToken": "${TELEGRAM_BOT_TOKEN}", "chatId": "123456789" }
+    { "type": "telegram", "botToken": "${TELEGRAM_BOT_TOKEN}", "chatId": "123456789" }   // setup: docs/telegram.md; add "replies": true to answer in the chat
     // { "type": "slack", "webhookUrl": "${SLACK_WEBHOOK_URL}" },
     // { "type": "email", "host": "smtp.example.com", "port": 587, "user": "alerts@example.com", "pass": "${SMTP_PASSWORD}", "from": "cvecondor <alerts@example.com>", "to": ["you@example.com"] },
     // { "type": "webhook", "url": "${WEBHOOK_URL}", "headers": { "Authorization": "Bearer ${WEBHOOK_TOKEN}" } },
