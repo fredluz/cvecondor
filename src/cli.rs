@@ -29,7 +29,7 @@ use crate::inbox::{keep, mark_read, unread};
 use crate::inventory::{CollectOptions, collect_inventory};
 use crate::matching::{OsvRecord, Severity, describe_secret, osv_family, osv_fixes, osv_query, osv_record, osv_severity};
 use crate::name::{ENV_PREFIX, NAME, VERSION};
-use crate::notify::{Notice, Notifier, SendResult, send_notice};
+use crate::notify::{Notice, Notifier, SendResult, deliver_to, notifier_lines, select_notifiers, send_notice};
 use crate::relay;
 use crate::responder::{StartOptions, recover_responses, running_count, start_response_with, wait_running};
 use crate::secrets::Exposure;
@@ -61,7 +61,12 @@ Usage: {NAME} <command> [--config FILE]
   vendors [--catalog [TERM]]  the vendors detected (and named in the config), with evidence and feeds;
                       --catalog lists the shipped catalogue's ids
   secrets             secrets found where they shouldn't be (names, places, fingerprints)
-  notify-test         send a test notice through every notifier
+  notify-test [TYPE|N]
+                      send a test notice through every notifier, or only the one named by its type (telegram) or its
+                      number in `status`
+  telegram-chat [--wait SECONDS] [--use ID|only] [--replies] [--env NAME]
+                      finds the chat that wrote to your bot (token from the env file) and, with --use, writes its id into
+                      the config's Telegram notifier (--replies also turns replies on); safe while the watcher runs
   replay --source ID --file F [--only TEXT] [--inventory FILE] [--respond]
                       replay a feed document against your inventory (or the inventory file given) in a throwaway state dir;
                       prints each case's rating, fix and the mode your agent would run in; --respond runs your agent
@@ -478,7 +483,7 @@ fn status(config: &Config) -> Result<String> {
         ),
         None => "off (cases are notified directly)".to_string(),
     };
-    let notifiers = config.notify.iter().map(|n| n.type_name()).collect::<Vec<_>>().join(", ");
+    let notifiers = notifier_lines(config, util::now());
     let rotation = match &config.rotation_map {
         Some(path) if path.exists() => {
             let keys = match serde_json::from_str::<serde_json::Value>(&fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?)
@@ -503,10 +508,7 @@ fn status(config: &Config) -> Result<String> {
     };
     let mut lines = vec![
         format!("{NAME} {VERSION}. Config {}; state {}", config.file.display(), dir.display()),
-        format!(
-            "Classifier: {classifier}. Responder: {responder}. Notifiers: {}",
-            if notifiers.is_empty() { "none (log only)".to_string() } else { notifiers }
-        ),
+        format!("Classifier: {classifier}. Responder: {responder}"),
         format!("Rotation map: {rotation}. Runbooks: {runbooks}"),
         format!(
             "Last cycle: {}",
@@ -516,6 +518,7 @@ fn status(config: &Config) -> Result<String> {
             )
         ),
     ];
+    lines.splice(2..2, notifiers);
     if let Some(l) = last.as_ref().filter(|l| !l.errors.is_empty()) {
         lines.push(format!("  errors: {}", l.errors.iter().take(6).cloned().collect::<Vec<_>>().join("; ")));
     }
@@ -989,6 +992,10 @@ struct Opts {
     mode: Option<String>,
     all: bool,
     peek: bool,
+    env_name: Option<String>,
+    wait: Option<u64>,
+    use_chat: Option<String>,
+    replies: bool,
     once: bool,
     test: bool,
     help: bool,
@@ -1014,6 +1021,10 @@ fn parse_args(args: Vec<OsString>) -> Result<(Opts, Vec<String>)> {
             Long("catalog") => opts.catalog = true,
             Long("all") => opts.all = true,
             Long("peek") => opts.peek = true,
+            Long("env") => opts.env_name = Some(parser.value()?.string()?),
+            Long("wait") => opts.wait = Some(parser.value()?.parse()?),
+            Long("use") => opts.use_chat = Some(parser.value()?.string()?),
+            Long("replies") => opts.replies = true,
             Long("once") => opts.once = true,
             Long("test") => opts.test = true,
             Long("help") | Short('h') => opts.help = true,
@@ -1045,6 +1056,18 @@ fn run(args: Vec<OsString>) -> Result<i32> {
     // Follow runs on the user's own machine, usually without a watcher config: it has its own (follow.json).
     if command == "follow" {
         return crate::follow::run(opts.config.as_deref(), opts.once, opts.test);
+    }
+    // Finding the chat comes before there is a notifier, and reads only the env file and the config's text.
+    if command == "telegram-chat" {
+        let options = crate::telegram::Options {
+            config: opts.config.as_deref(),
+            token_var: opts.env_name.as_deref(),
+            wait: opts.wait.unwrap_or(0),
+            use_chat: opts.use_chat.as_deref(),
+            replies: opts.replies,
+        };
+        say(&crate::telegram::run(&options, &Net)?);
+        return Ok(0);
     }
     let env = process_env();
     let config = load_config(opts.config.as_deref(), &env)?;
@@ -1138,7 +1161,10 @@ fn run(args: Vec<OsString>) -> Result<i32> {
                 urls: None,
                 report_path: None,
             };
-            let result = send_notice(&config, &notice, &Net, util::now());
+            let result = match positionals.get(1) {
+                Some(which) => deliver_to(&config, &select_notifiers(&config, which)?, &notice, &Net, util::now()),
+                None => send_notice(&config, &notice, &Net, util::now()),
+            };
             let sent = if result.sent.is_empty() { "none".to_string() } else { result.sent.join(", ") };
             let errors = if result.errors.is_empty() { String::new() } else { format!("\nerrors:\n  {}", result.errors.join("\n  ")) };
             say(&format!("sent: {sent}{errors}"));

@@ -16,7 +16,7 @@ use cvecondor::config::{Config, Env, NotifierConfig, NotifyEvent, build_config};
 use cvecondor::http::{Request, Response};
 use cvecondor::inbox::{keep, unread};
 use cvecondor::notify::Notice;
-use cvecondor::relay::{PollOptions, RelayJob, poll_once, run_job};
+use cvecondor::relay::{PollOptions, RelayJob, poll_once, run_job, seen_chats, status_text};
 use cvecondor::util::{parse_time, sha256_hex};
 use serde_json::{Value, json};
 
@@ -312,4 +312,103 @@ fn a_message_the_agent_could_not_answer_is_kept_told_once_and_answered_late_afte
     assert!(calls[1].prompt.contains("Answered late") && calls[1].prompt.contains("yes, merge it") && !calls[0].prompt.contains("Answered late"));
     let again = poll_once(&config, notifier(&config), &fetch, &agent, &at("2026-10-22T23:00:00Z"), &options).expect("polls");
     assert_eq!((again, calls.len()), (0, 2), "answered once, not again");
+}
+
+fn offset_path(state: &Path) -> std::path::PathBuf {
+    state.join(format!("relay-{}.json", &sha256_hex(TOKEN.as_bytes())[..8]))
+}
+
+#[test]
+fn a_first_read_with_nothing_waiting_is_still_the_first_read_so_the_first_real_message_is_answered() {
+    let dir = TempDir::new("cvecondor-relay");
+    let (config, env) = setup(dir.path(), json!(["agent"]));
+    std::fs::remove_file(offset_path(dir.path())).expect("no offset yet");
+    // Nothing waits when the relay starts; the user writes after it did.
+    let telegram = Telegram::new(vec![json!([]), json!([text(30, 7, 42, "are you there?")])]);
+    let fetch = |req: Request| telegram.fetch(req);
+    let seen = Mutex::new(Vec::<String>::new());
+    let agent = |job: &RelayJob| -> Result<String> {
+        seen.lock().unwrap_or_else(PoisonError::into_inner).push(job.text.clone());
+        Ok("yes".to_string())
+    };
+    let logged = Mutex::new(Vec::<String>::new());
+    let log = |line: &str| logged.lock().unwrap_or_else(PoisonError::into_inner).push(line.to_string());
+    let options = PollOptions { env: Some(&env), log: Some(&log), ..PollOptions::default() };
+
+    assert_eq!(poll_once(&config, notifier(&config), &fetch, &agent, &|| now(), &options).expect("first poll"), 0);
+    let stored: Value = serde_json::from_str(&std::fs::read_to_string(offset_path(dir.path())).expect("the first read is kept")).expect("json");
+    assert_eq!(stored, json!({}));
+    assert!(logged.lock().unwrap_or_else(PoisonError::into_inner).join("\n").contains("first read of this bot: skipped 0 earlier update(s)"));
+
+    assert_eq!(poll_once(&config, notifier(&config), &fetch, &agent, &|| now(), &options).expect("second poll"), 1);
+    assert_eq!(*seen.lock().unwrap_or_else(PoisonError::into_inner), ["are you there?"]);
+    assert_eq!(telegram.sent()[0]["text"], "yes");
+    // The first poll catches up without waiting (a message sent meanwhile is not backlog); later ones long-poll.
+    let polls = telegram.polls();
+    assert!(polls[0].contains("getUpdates?timeout=0") && !polls[0].contains("offset"), "{}", polls[0]);
+    assert!(polls[1].contains("getUpdates?timeout=50") && !polls[1].contains("offset"), "{}", polls[1]);
+}
+
+#[test]
+fn every_chat_that_wrote_is_remembered_by_name_even_when_skipped_and_never_its_text() {
+    let dir = TempDir::new("cvecondor-relay");
+    let (config, env) = setup(dir.path(), json!(["agent"]));
+    std::fs::remove_file(offset_path(dir.path())).expect("no offset yet");
+    let start = json!({ "update_id": 40, "message": { "message_id": 1, "text": "/start please-never-keep-this",
+        "chat": { "id": 123456789, "type": "private", "first_name": "Ana", "last_name": "Silva", "username": "ana" } } });
+    let group = json!({ "update_id": 41, "my_chat_member": { "chat": { "id": -100777, "type": "supergroup", "title": "Ops" } } });
+    let telegram = Telegram::new(vec![json!([start, group])]);
+    let fetch = |req: Request| telegram.fetch(req);
+    let agent = |_: &RelayJob| -> Result<String> { panic!("the backlog never reaches the agent") };
+    let options = PollOptions { env: Some(&env), ..PollOptions::default() };
+
+    poll_once(&config, notifier(&config), &fetch, &agent, &|| now(), &options).expect("polls");
+
+    let chats = seen_chats(dir.path(), TOKEN);
+    assert_eq!(chats.iter().map(|c| (c.id, c.describe())).collect::<Vec<_>>(), [
+        (123456789, "private: Ana Silva @ana".to_string()),
+        (-100777, "supergroup: \"Ops\"".to_string())
+    ]);
+    for entry in std::fs::read_dir(dir.path()).expect("lists the state dir") {
+        let content = std::fs::read_to_string(entry.expect("an entry").path()).unwrap_or_default();
+        assert!(!content.contains("never-keep-this"), "a written text must not be kept");
+    }
+}
+
+#[test]
+fn status_says_whether_replies_are_on_and_whether_the_relay_is_reading_failing_or_answering() {
+    let dir = TempDir::new("cvecondor-relay");
+    let (config, env) = setup(dir.path(), json!(["agent"]));
+    let status_at = |seconds: i64| {
+        let at = jiff::Timestamp::from_second(now().as_second() + seconds).expect("a time");
+        status_text(&config, notifier(&config), at).expect("a telegram notifier")
+    };
+    assert_eq!(status_at(0), "replies on, NOT reading yet: no poll recorded (start or restart the watcher)");
+
+    let telegram = Telegram::new(vec![]);
+    let fetch = |req: Request| telegram.fetch(req);
+    let busy = Mutex::new(String::new());
+    let agent = |_: &RelayJob| -> Result<String> { Ok("ok".to_string()) };
+    let options = PollOptions { env: Some(&env), ..PollOptions::default() };
+    poll_once(&config, notifier(&config), &fetch, &agent, &|| now(), &options).expect("polls");
+    assert_eq!(status_at(30), "replies on, reading (last poll 30 s ago)");
+    assert!(status_at(600).starts_with("replies on, NOT reading: last poll 10 min ago"), "{}", status_at(600));
+
+    // While a message is being answered no poll returns for a while: still reading.
+    let telegram = Telegram::new(vec![json!([text(50, 1, 42, "status?")])]);
+    let fetch = |req: Request| telegram.fetch(req);
+    let agent = |_: &RelayJob| -> Result<String> {
+        *busy.lock().unwrap_or_else(PoisonError::into_inner) = status_at(600);
+        Ok("fine".to_string())
+    };
+    poll_once(&config, notifier(&config), &fetch, &agent, &|| now(), &options).expect("polls");
+    assert_eq!(*busy.lock().unwrap_or_else(PoisonError::into_inner), "replies on, reading (answering a message now)");
+    assert!(status_at(30).starts_with("replies on, reading (last poll"), "{}", status_at(30));
+
+    // A second reader makes Telegram answer 409: say it, until a poll succeeds again.
+    let conflict = |_: Request| Ok(Response { status: 409, headers: Vec::new(), body: b"{}".to_vec() });
+    poll_once(&config, notifier(&config), &conflict, &agent, &|| now(), &options).expect_err("a conflict");
+    assert!(status_at(30).starts_with("replies on, FAILING: this bot has another getUpdates reader"), "{}", status_at(30));
+    poll_once(&config, notifier(&config), &fetch, &agent, &|| now(), &options).expect("polls again");
+    assert!(status_at(30).starts_with("replies on, reading"), "{}", status_at(30));
 }

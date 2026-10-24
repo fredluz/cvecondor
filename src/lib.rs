@@ -22,6 +22,7 @@ pub mod retry;
 pub mod responder;
 pub mod secrets;
 pub mod state;
+pub mod telegram;
 pub mod types;
 pub mod util;
 pub mod upstream;

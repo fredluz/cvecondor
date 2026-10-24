@@ -15,7 +15,7 @@ use anyhow::{Result, anyhow};
 use common::test_config;
 use cvecondor::config::NotifyEvent;
 use cvecondor::http::{Request, Response};
-use cvecondor::notify::{Notice, SendResult, send_notice};
+use cvecondor::notify::{Notice, SendResult, deliver_to, notifier_lines, select_notifiers, send_notice};
 use cvecondor::util::{base64_decode, parse_time};
 use serde_json::{Value, json};
 
@@ -231,4 +231,45 @@ fn a_failing_notifier_reports_without_its_token_or_webhook_url_and_the_others_st
     for e in &result.errors {
         assert!(!e.contains(token) && !e.contains("very-secret") && !e.contains(slack_url) && !e.contains("xyzSECRET"), "{e}");
     }
+}
+
+#[test]
+fn a_test_line_can_go_to_one_notifier_named_by_its_type_or_its_number() {
+    let (urls, fetch) = recording(|_| ok("ok"));
+    let config = test_config(json!({ "notify": [
+        { "type": "telegram", "botToken": "123:abc", "chatId": "1" },
+        { "type": "webhook", "url": "https://hooks.example/n", "headers": {} }
+    ] }));
+    let test = Notice { event: NotifyEvent::Test, ..notice() };
+    let sent_to = |which: &str| {
+        urls.lock().unwrap_or_else(PoisonError::into_inner).clear();
+        let result = deliver_to(&config, &select_notifiers(&config, which).expect("a notifier"), &test, &fetch, now());
+        (result.sent, urls.lock().unwrap_or_else(PoisonError::into_inner).len())
+    };
+    assert_eq!(sent_to("webhook"), (vec!["webhook".to_string()], 1));
+    assert_eq!(sent_to("1"), (vec!["telegram".to_string()], 1));
+    let both = deliver_to(&config, &config.notify.iter().collect::<Vec<_>>(), &test, &fetch, now());
+    assert_eq!(both.sent.len(), 2);
+
+    let unknown = select_notifiers(&config, "slack").expect_err("no slack notifier").to_string();
+    assert_eq!(unknown, "no notifier 'slack': name a type or a number: 1 (telegram), 2 (webhook)");
+    assert!(select_notifiers(&config, "3").is_err() && select_notifiers(&config, "0").is_err());
+}
+
+#[test]
+fn status_lists_each_notifier_by_number_with_its_events_and_never_a_secret() {
+    let config = test_config(json!({ "notify": [
+        { "type": "telegram", "botToken": "987654:AAH-very-secret-token", "chatId": 42 },
+        { "type": "slack", "events": ["urgent", "case"], "webhookUrl": "https://hooks.slack.com/services/T0/B0/xyzSECRET" }
+    ] }));
+    let lines = notifier_lines(&config, now());
+    assert_eq!(
+        lines,
+        [
+            "Notifiers:",
+            "  1. telegram (urgent) to chat 42; replies off (urgent lines only go out)",
+            "  2. slack (urgent, case)"
+        ]
+    );
+    assert_eq!(notifier_lines(&test_config(json!({})), now()), ["Notifiers: none (log only)"]);
 }

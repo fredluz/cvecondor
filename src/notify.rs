@@ -72,6 +72,43 @@ const URGENT_MAX: usize = 300;
 /// does not stop the others; its error (scrubbed of its own secrets, then of the config's) lands in `errors`.
 pub fn send_notice(config: &Config, notice: &Notice, fetch: &dyn Fetch, now: Timestamp) -> SendResult {
     let targets: Vec<&NotifierConfig> = config.notify.iter().filter(|n| notice.event == NotifyEvent::Test || n.events.contains(&notice.event)).collect();
+    deliver_to(config, &targets, notice, fetch, now)
+}
+
+/// The notifiers `which` names: its `type` (`telegram`) or its 1-based place in `notify` (`2`, as `status` numbers them).
+pub fn select_notifiers<'a>(config: &'a Config, which: &str) -> Result<Vec<&'a NotifierConfig>> {
+    let numbered = which.parse::<usize>().ok().and_then(|n| n.checked_sub(1)).and_then(|i| config.notify.get(i));
+    let picked: Vec<&NotifierConfig> = match numbered {
+        Some(n) => vec![n],
+        None => config.notify.iter().filter(|n| n.type_name() == which).collect(),
+    };
+    if picked.is_empty() {
+        let have = config.notify.iter().enumerate().map(|(i, n)| format!("{} ({})", i + 1, n.type_name())).collect::<Vec<_>>().join(", ");
+        bail!("no notifier '{which}': {}", if have.is_empty() { "none are configured".to_string() } else { format!("name a type or a number: {have}") });
+    }
+    Ok(picked)
+}
+
+/// `status`' notifier lines: each notifier by the number `notify-test` takes, the events it gets, and for Telegram the
+/// chat and whether replies are on and being read. Never a token, webhook URL or password.
+pub fn notifier_lines(config: &Config, now: Timestamp) -> Vec<String> {
+    if config.notify.is_empty() {
+        return vec!["Notifiers: none (log only)".to_string()];
+    }
+    let mut lines = vec!["Notifiers:".to_string()];
+    for (i, n) in config.notify.iter().enumerate() {
+        let events = n.events.iter().map(|e| e.as_str()).collect::<Vec<_>>().join(", ");
+        let detail = match &n.kind {
+            NotifierKind::Telegram { chat_id, .. } => format!(" to chat {chat_id}; {}", crate::relay::status_text(config, n, now).unwrap_or_default()),
+            _ => String::new(),
+        };
+        lines.push(format!("  {}. {} ({events}){detail}", i + 1, n.type_name()));
+    }
+    lines
+}
+
+/// `send_notice` to exactly these notifiers, whatever events they listen for.
+pub fn deliver_to(config: &Config, targets: &[&NotifierConfig], notice: &Notice, fetch: &dyn Fetch, now: Timestamp) -> SendResult {
     let urgent;
     let notice = if notice.event == NotifyEvent::Urgent {
         urgent = Notice { title: urgent_line(&notice.title), text: String::new(), ..notice.clone() };
@@ -79,7 +116,7 @@ pub fn send_notice(config: &Config, notice: &Notice, fetch: &dyn Fetch, now: Tim
     } else {
         notice
     };
-    let results = parallel_map(&targets, targets.len(), |n| {
+    let results = parallel_map(targets, targets.len(), |n| {
         let label = label_of(n);
         match deliver(n, notice, fetch, now) {
             Ok(()) => (label, None),

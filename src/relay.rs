@@ -148,6 +148,158 @@ struct Offset {
     offset: Option<i64>,
 }
 
+/// A chat that wrote to the bot, as Telegram describes it. Names only: never what was written.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Chat {
+    pub id: i64,
+    /// `private`, `group`, `supergroup` or `channel`.
+    #[serde(default, rename = "type")]
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_name: Option<String>,
+}
+
+impl Chat {
+    /// `private chat with Ana Silva (@ana)` / `group "Ops"`: how the user would recognise it.
+    pub fn describe(&self) -> String {
+        let name = match (&self.title, &self.first_name, &self.last_name) {
+            (Some(title), _, _) => format!("\"{title}\""),
+            (None, Some(first), Some(last)) => format!("{first} {last}"),
+            (None, Some(first), None) => first.clone(),
+            _ => String::new(),
+        };
+        let at = self.username.as_deref().map(|u| format!("@{u}")).unwrap_or_default();
+        let who = [name, at].iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join(" ");
+        let kind = if self.kind.is_empty() { "chat" } else { &self.kind };
+        if who.is_empty() { kind.to_string() } else { format!("{kind}: {who}") }
+    }
+}
+
+/// The chat of an update, whatever kind of update it is (`message`, `my_chat_member`, ...).
+pub fn chat_of(update: &Value) -> Option<Chat> {
+    let chat = update.as_object()?.iter().filter(|(key, _)| key.as_str() != "update_id").find_map(|(_, v)| v.get("chat"))?;
+    let text = |key: &str| chat.get(key).and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string);
+    Some(Chat {
+        id: chat.get("id")?.as_i64()?,
+        kind: text("type").unwrap_or_default(),
+        title: text("title"),
+        username: text("username"),
+        first_name: text("first_name"),
+        last_name: text("last_name"),
+    })
+}
+
+/// What the relay keeps for one bot beside its offset, for `status` and `telegram-chat`: when it last read, how it
+/// is failing, whether it is answering a message, and who wrote to the bot.
+#[derive(Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Seen {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    polled_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    handling_since: Option<String>,
+    #[serde(default)]
+    chats: IndexMap<String, Chat>,
+}
+
+/// `relay-<first 8 hex of sha256(token)>-seen.json`.
+fn seen_file(token: &str) -> String {
+    format!("relay-{}-seen.json", &sha256_hex(token.as_bytes())[..8])
+}
+
+fn update_seen(config: &Config, token: &str, change: impl FnOnce(&mut Seen)) {
+    let file = seen_file(token);
+    let mut seen: Seen = read_state(&config.state_dir, &file).unwrap_or_default();
+    change(&mut seen);
+    if let Err(e) = write_state(&config.state_dir, &file, &seen) {
+        util::log(&format!("relay: could not keep its status: {}", scrub(config, token, &format!("{e:#}"))));
+    }
+}
+
+/// A poll came back: the relay is reading, and these chats wrote to the bot.
+fn note_poll(config: &Config, token: &str, at: Timestamp, chats: &[Chat]) {
+    update_seen(config, token, |seen| {
+        seen.polled_at = Some(iso(at));
+        seen.error = None;
+        for chat in chats {
+            seen.chats.insert(chat.id.to_string(), chat.clone());
+        }
+    });
+}
+
+/// A poll failed: `status` says why, until the next one succeeds.
+fn note_error(config: &Config, token: &str, error: &str) {
+    update_seen(config, token, |seen| seen.error = Some(error.to_string()));
+}
+
+fn note_handling(config: &Config, token: &str, since: Option<Timestamp>) {
+    update_seen(config, token, |seen| seen.handling_since = since.map(iso));
+}
+
+/// Clears "answering a message" however the batch ends.
+struct Handling<'a> {
+    config: &'a Config,
+    token: &'a str,
+}
+
+impl Drop for Handling<'_> {
+    fn drop(&mut self) {
+        note_handling(self.config, self.token, None);
+    }
+}
+
+/// The chats the relay has seen writing to the bot of `token`, oldest first.
+pub fn seen_chats(state_dir: &Path, token: &str) -> Vec<Chat> {
+    read_state::<Seen>(state_dir, &seen_file(token)).map(|s| s.chats.into_values().collect()).unwrap_or_default()
+}
+
+/// A poll this recent means a daemon is reading now (a long poll lasts `LONG_POLL_SECONDS`).
+const READING_SECONDS: i64 = 150;
+
+fn short_ago(seconds: i64) -> String {
+    match seconds {
+        s if s < 120 => format!("{} s", s.max(0)),
+        s if s < 7200 => format!("{} min", s / 60),
+        s if s < 172_800 => format!("{} h", s / 3600),
+        s => format!("{} d", s / 86_400),
+    }
+}
+
+/// The reply part of a notifier's line in `status`: `None` for a notifier that is not Telegram.
+pub fn status_text(config: &Config, notifier: &NotifierConfig, now: Timestamp) -> Option<String> {
+    let NotifierKind::Telegram { bot_token, replies, .. } = &notifier.kind else { return None };
+    if !replies {
+        return Some("replies off (urgent lines only go out)".to_string());
+    }
+    let seen: Seen = read_state(&config.state_dir, &seen_file(bot_token)).unwrap_or_default();
+    let since = |at: &Option<String>| at.as_deref().and_then(util::parse_time).map(|t| now.as_second() - t.as_second());
+    let age = since(&seen.polled_at);
+    let busy = since(&seen.handling_since).filter(|s| *s < AGENT_TIMEOUT.as_secs() as i64 + 60);
+    Some(if let Some(error) = &seen.error {
+        format!("replies on, FAILING: {error}")
+    } else if busy.is_some() {
+        "replies on, reading (answering a message now)".to_string()
+    } else {
+        match age {
+            Some(s) if s < READING_SECONDS => format!("replies on, reading (last poll {} ago)", short_ago(s)),
+            Some(s) => format!(
+                "replies on, NOT reading: last poll {} ago (the watcher is not running, or it only polls once per cycle: cron, the Action)",
+                short_ago(s)
+            ),
+            None => "replies on, NOT reading yet: no poll recorded (start or restart the watcher)".to_string(),
+        }
+    })
+}
+
 /// One incoming text, with what the answer needs to point back at it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Incoming {
@@ -398,6 +550,7 @@ pub fn poll_once(
     let Some((token, chat_id)) = reader(notifier) else { bail!("not a telegram notifier with replies") };
     poll(config, token, chat_id, fetch, run_agent, now, options)
         .map_err(|e| if e.downcast_ref::<Conflict>().is_some() { e } else { anyhow!("{}", scrub(config, token, &format!("{e:#}"))) })
+        .inspect_err(|e| note_error(config, token, &e.to_string()))
 }
 
 fn poll(
@@ -412,13 +565,19 @@ fn poll(
     // Messages the agent could not answer earlier go first, once their time has come.
     let retried = answer_waiting(config, token, chat_id, fetch, run_agent, now, options);
     let file = offset_file(token);
-    let offset = read_state::<Offset>(&config.state_dir, &file).and_then(|o| o.offset);
-    let mut url = format!("{API}/bot{token}/getUpdates?timeout={}", options.wait_seconds);
+    // No state file at all is the first read of this bot. The file exists from then on, even when nothing was waiting,
+    // so the first real message is never taken for the backlog.
+    let stored = read_state::<Offset>(&config.state_dir, &file);
+    let first = stored.is_none();
+    let offset = stored.and_then(|o| o.offset);
+    // The first read only catches up with the backlog: it returns at once, so a message sent while it waited is not in it.
+    let wait = if first { 0 } else { options.wait_seconds };
+    let mut url = format!("{API}/bot{token}/getUpdates?timeout={wait}");
     if let Some(offset) = offset {
         url.push_str(&format!("&offset={offset}"));
     }
     url.push_str(&format!("&allowed_updates={}", url_encode(r#"["message"]"#)));
-    let request = Request::get(url).header("user-agent", USER_AGENT).timeout(Duration::from_secs(options.wait_seconds) + POLL_SLACK);
+    let request = Request::get(url).header("user-agent", USER_AGENT).timeout(Duration::from_secs(wait) + POLL_SLACK);
     let res = fetch.fetch(request)?;
     if res.status == 409 {
         return Err(Conflict.into());
@@ -429,20 +588,29 @@ fn poll(
         bail!("getUpdates: HTTP {}: {why}", res.status);
     }
     let updates: &[Value] = body.get("result").and_then(Value::as_array).map_or(&[], Vec::as_slice);
-    let Some(last) = updates.iter().filter_map(|u| u.get("update_id").and_then(Value::as_i64)).max() else { return Ok(retried) };
+    // Everyone who wrote to the bot is remembered (names only, never texts), also what is skipped or ignored below:
+    // `cvecondor telegram-chat` reads this while the relay holds the bot.
+    let chats: Vec<Chat> = updates.iter().filter_map(chat_of).collect();
+    let t = now();
+    note_poll(config, token, t, &chats);
+    let last = updates.iter().filter_map(|u| u.get("update_id").and_then(Value::as_i64)).max();
 
     // From here a message is being taken on: a stopping daemon waits for it, and one that has stopped leaves the batch unread.
     let _busy = Busy::enter();
     if options.stop.is_some_and(|stop| stop.load(Ordering::SeqCst)) {
         return Ok(retried);
     }
-    write_state(&config.state_dir, &file, &Offset { offset: Some(last + 1) })?;
     // The first read of a bot starts the conversation now: what was sent before replies were on (perhaps long ago, to
     // an earlier reader) is never acted on.
-    if offset.is_none() {
+    if first {
+        write_state(&config.state_dir, &file, &Offset { offset: last.map(|l| l + 1) })?;
         options.say(&format!("relay: first read of this bot: skipped {} earlier update(s); replies start now", updates.len()));
         return Ok(retried);
     }
+    let Some(last) = last else { return Ok(retried) };
+    write_state(&config.state_dir, &file, &Offset { offset: Some(last + 1) })?;
+    note_handling(config, token, Some(t));
+    let _handling = Handling { config, token };
 
     let mut waiting: Waiting = read_state(&config.state_dir, WAITING_FILE).unwrap_or_default();
     let mut handled = 0;
