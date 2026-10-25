@@ -2,8 +2,8 @@
 # and its containers (through a socket proxy that allows GET requests only, so the watcher's collectors can read
 # but never start, stop, exec or delete anything).
 #
-# Built from this checkout: `docker compose -f deploy/docker-compose.yml build` (add `--build-arg AGENT=claude` or
-# `codex` for the responder's CLI; the Dockerfile says what each adds), then `up -d`.
+# Built from this checkout: `docker compose -f deploy/docker-compose.yml build` (add `--build-arg AGENTS="claude
+# codex omp"` — any subset — for the responder's CLIs; the Dockerfile says what each adds), then `up -d`.
 #
 # Secrets: the config dir holds config.json and cvecondor.env together, outside this checkout, readable by the
 # container's user (uid 1000) and nobody else. CVECondor loads cvecondor.env from there itself: never pass it as

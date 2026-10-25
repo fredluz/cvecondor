@@ -21,7 +21,7 @@ Two more rules while setting up:
   - **Container:** Docker with compose, and the clone on that machine; `docker compose build` compiles inside the image, no Rust on the host.
   - Check it with `cvecondor --version`.
 - **git**; **gitleaks** for secret scanning (`brew install gitleaks`, `apt install gitleaks`, or gitleaks' release binary with its checksum; the container image has it). Without gitleaks everything else still works, and `inventory` warns "gitleaks is not installed: secret scanning skipped".
-- **With a responder** (4b), where CVECondor runs and as the user it runs as: the agent CLI itself, logged in; git and `gh`, with git pushing through gh (`git config --global credential.https://github.com.helper '!gh auth git-credential'`), so the `GH_TOKEN` in `responder.env` is its git login for fix branches and pull requests. The image adds these with `--build-arg AGENT=claude|codex` (git and gh for any `AGENT` value); a plain daemon needs them installed.
+- **With a responder** (4b), where CVECondor runs and as the user it runs as: the agent CLI itself, logged in; git and `gh`, with git pushing through gh (`git config --global credential.https://github.com.helper '!gh auth git-credential'`), so the `GH_TOKEN` in `responder.env` is its git login for fix branches and pull requests. The image adds these with `--build-arg AGENTS="claude codex omp"` (any subset; git and gh for any `AGENTS` value, and `AGENT=<one>` still works); a plain daemon needs them installed.
 - **This repo** on the machine you talk to them from: the docs and the responder brief (the binary also carries the brief).
 - **Secrets, wherever it runs:** `cvecondor.env` sits next to the config, outside any git checkout, readable only by the user CVECondor runs as. It never goes into a container's environment (`env_file`, `environment`), a unit's `Environment=`, or the repo.
 - **Acting on the server** (with a responder, when CVECondor covers a server). The responder updates there by default, and works around or stops only on `actOn` services, so it needs a way to change the server that the collectors don't have. What must be true, for either deployment (the headers of `deploy/docker-compose.yml` and `deploy/systemd/cvecondor.service` say the same):
@@ -178,18 +178,26 @@ Three agents have presets (`"agent": "claude" | "codex" | "omp"`), with a tighte
   1. On any machine with Claude Code installed and a browser (their laptop is fine), they run `claude setup-token`.
   2. It opens the browser to log in to their Claude account and authorise the token, then prints a long-lived OAuth token in the terminal (it starts with `sk-ant-oat01-`). It is tied to their subscription, not billed per use.
   3. They copy it and run the env-file recipe with `NAME` = `CLAUDE_CODE_OAUTH_TOKEN`, then clear the terminal.
-  4. The config passes it to the responder by name: `"responder": { "env": { "CLAUDE_CODE_OAUTH_TOKEN": "${CLAUDE_CODE_OAUTH_TOKEN}" } }`. In a container, build the image with `--build-arg AGENT=claude`.
+  4. The config passes it to the responder by name: `"responder": { "env": { "CLAUDE_CODE_OAUTH_TOKEN": "${CLAUDE_CODE_OAUTH_TOKEN}" } }`. In a container, build the image with `claude` in `--build-arg AGENTS=`.
 
   This works the same on a server, in a container or in the GitHub Action (its `agent: claude` input installs Claude Code on the runner; the token goes in the repo's Actions secrets). If CVECondor runs as a plain daemon under a user that has already run `claude` and logged in interactively, that login also works and no token is needed.
 - **Codex** (`"agent": "codex"`; a ChatGPT plan that includes Codex):
   - **Plain daemon:** as the user CVECondor runs as, on that machine, they run `codex login --device-auth`. It prints a URL and a one-time code (neither is a secret); they open the URL on any device, log in to ChatGPT and enter the code. If it says device-code login is off, they turn it on in ChatGPT's security settings, or run `codex login` on their laptop and copy `~/.codex/auth.json` to the same path on the server with `scp` (it is a credential: `chmod 600`, never `cat` it).
-  - **Container:** the login must live on the data volume. Build with `--build-arg AGENT=codex`, run the login once inside it, and point the responder at it:
+  - **Container:** the login must live on the data volume. Build with `codex` in `--build-arg AGENTS=`, run the login once inside it, and point the responder at it:
     ```sh
     docker compose run --rm --entrypoint sh cvecondor -c 'mkdir -p /data/codex && CODEX_HOME=/data/codex codex login --device-auth'
     ```
     and `"responder": { "env": { "CODEX_HOME": "/data/codex" } }`.
-- **omp** (`"agent": "omp"`; plain daemon only, the image does not include it): as the user CVECondor runs as, on that machine, `omp login` (pick the provider their subscription is with, e.g. `omp login anthropic`) and follow its prompts. If the server has no browser, copy the login from their laptop instead, without it showing: `omp auth export | ssh <host> omp auth import -`. That copies every login stored on the laptop; tell them so before they run it.
-- **Anything else:** `"responder": { "command": ["<cli>", "<headless flag>", "<auto-approve flag>", "{prompt}"], "env": { "<LOGIN_VAR>": "${<LOGIN_VAR>}" } }`, from steps 1–4. In a container, the image needs that CLI: add it to the `Dockerfile` (as the `AGENT` build arg does for claude and codex) or build on top of the image.
+- **omp** (`"agent": "omp"`; its login is a file under its home, `~/.omp/agent/agent.db`, whichever provider it logs in to):
+  - **Plain daemon:** as the user CVECondor runs as, on that machine, `omp login` (pick the provider their subscription is with) and follow its prompts. If the machine has no browser, copy the login from their laptop instead, without it showing: `omp auth export | ssh <host> omp auth import -`. That copies every login stored on the laptop; tell them so before they run it.
+  - **Container:** the login must live on the data volume. Build with `omp` in `--build-arg AGENTS=`, log in once inside it with `HOME` on `/data`, and point the responder at it:
+    ```sh
+    docker compose run --rm --entrypoint sh cvecondor -c 'mkdir -p /data/omp && HOME=/data/omp omp login'
+    # or copy a login from a machine that has one:
+    omp auth export | docker compose run --rm -T --entrypoint sh cvecondor -c 'mkdir -p /data/omp && HOME=/data/omp omp auth import -'
+    ```
+    and `"responder": { "env": { "HOME": "/data/omp" } }`. The `omp auth export` copy copies every login stored on that machine; tell the user so before they run it.
+- **Anything else:** `"responder": { "command": ["<cli>", "<headless flag>", "<auto-approve flag>", "{prompt}"], "env": { "<LOGIN_VAR>": "${<LOGIN_VAR>}" } }`, from steps 1–4. In a container, the image needs that CLI: add it to the `Dockerfile` (as the `AGENTS` build arg does for claude, codex and omp) or build on top of the image.
 
 Prove it in step 7 with one propose-only response.
 
