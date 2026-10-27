@@ -41,6 +41,7 @@ CVECondor tells you when something you run becomes vulnerable, before you read a
   - **A fix exists:** it updates, batched per host and per repo: on a server it pulls or upgrades and recreates only what changed, keeping the old image for a rollback; in a repo it opens a tested pull request with your own git login, and never merges it. It checks the service still works, and tells you.
   - **No fix yet:** it confirms whether the vulnerability is exploitable on your system (trigger conditions, reachable input, exposure). Not exploitable: it tells you "you'll need to update, but you're fine for now" and tracks the fix. Exploitable: it tells you at once and works around it (guard, disable, block, pin; a restorable stop only as a last resort). When the fix ships, the case reopens so the update goes in and the workaround comes out.
   - **Defaults:** applying a fixed release is on (switch it off per service with `updateExcept`, or entirely with `updateWhenFixed: false`). Working around an exploitable problem, or stopping a service, is a per-service opt-in (`actOn`); everywhere else you get exact commands, diffs, verification and undo. What was already there at install is assessed and proposed, unless it is exploited in the wild.
+- **Every case is open, waiting or closed.** Open: the responder still has work. Waiting: nothing until something outside happens, and `status` says what — a fix upstream (tracked, the case reopens when it ships), your decision (a fix PR to merge, a proposal to approve), or a stopped service to bring back. Closed: fixed (the inventory no longer matches it; it reopens if it ever does again), not applicable (triage said so), or dismissed by you (`cvecondor close`).
 
 ## Quick start: talk to your agent
 
@@ -99,7 +100,8 @@ run                 daemon: a cycle every pollMinutes, inventory every inventory
 cycle               one cycle now; waits for responders
 inventory [--out F] refresh the inventory now (read-only)
 baseline [--out F]  critical/high per place today, secrets where they shouldn't be, vendors watched
-status              last cycle, sources, collectors, notifiers (and whether Telegram replies are being read), open cases
+status [--closed]     last cycle, sources, collectors, notifiers (and whether Telegram replies are being read),
+                      cases: open and waiting (with what each waits on); --closed also lists closed ones
 vendors             the vendors detected (and named in the config); --catalog [TERM] lists catalogue ids
 secrets             secret findings: names, places, fingerprints
 notify-test [TYPE|N]  a test line through every notifier, or only one (its type, or its number in `status`)
@@ -113,7 +115,8 @@ replay --source ID --file F [--only TEXT] [--inventory FILE] [--respond]
 respond KEY [--mode propose|update|act]
                     run the responder on one case now (a lower-severity case, or a mode you choose; failed runs retry by themselves)
 record KEY --file REPORT
-                    record a case handled in conversation: its report, what it waits for (fix tracking), and the fixed releases it names
+                    record a case handled in conversation: its report, what it waits for (fix tracking), the fixed releases it names, and the pull requests it opened for you to merge
+close KEY [--note T]  close a case you want nothing more about (dismissed; it never reopens on its own)
 follow [--once | --test] [--config FILE]
                     on your own machine: each urgent line from the watcher opens a session of your agent
 ```

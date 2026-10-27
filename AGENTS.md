@@ -74,7 +74,7 @@ The split you work within:
 
 | File | What it holds |
 |---|---|
-| `cases.json` | Every case. `state`: `pending` (to dispatch), `handled`, `watch` (recorded, below the notify floor), `unsure`/`not-affected` (prose the classifier or name match set aside), `judging`. Also `assessment` (the watcher's first rating), `triage` (the responder's: its path, why, rating, fix released, exploitable), `places`, `affected`, `atRisk` (secrets stored there), `waitingFor`, `fixedReleases` (per component, from a `split` response), `splitFrom` (the case whose fixed releases opened this one), `report`, `baseline` (found at install). |
+| `cases.json` | Every case. `status`: `open` (the responder still has work), `waiting` (nothing until something outside happens: `statusReason` says what — an `upstream` fix, a `user` decision (a fix pull request in `pullRequests`, a proposal), a `service` to bring back, `applied` (the inventory to show the fix), `watching` (recorded, below the floor)); `closed`, `statusReason` `fixed` (the inventory no longer matches), `not-applicable` or `dismissed` (`cvecondor close <key>`). A case closed as `fixed` reopens by itself if the inventory matches it again; the others never do. `state` is the triage machinery: `pending` (to dispatch), `handled`, `watch` (recorded, below the notify floor), `unsure`/`not-affected` (set aside), `judging`. Also `assessment` (the watcher's first rating), `triage` (the responder's: its path, why, rating, fix released, exploitable), `places`, `affected`, `atRisk` (secrets stored there), `waitingFor`, `fixedReleases` (per component, from a `split` response), `splitFrom` (the case whose fixed releases opened this one), `pullRequests` (opened for the user to merge), `report`, `baseline` (found at install). |
 | `cases/<key>.json` | The case file a responder works from: the case plus related cases, services, runbooks, mode. |
 | `reports/<date>-<key>.md` | Each case's report: the responder's, or the notice. |
 | `reports/<date>-batch-<time>.md`, `batches.json` | Each batch (the cases one cycle found) in full; which batches were summarised and had their results reported. |
@@ -104,7 +104,7 @@ The split you work within:
 4. If they use `follow` (on their own machine, settings in `~/.config/cvecondor/follow.json`): is its unit running (`launchctl list | grep cvecondor.follow`, `systemctl --user status cvecondor-follow`), what does its log say (one line when it starts failing, one when it recovers), and does `cvecondor follow --test` reach them? Its own state is `~/.local/state/cvecondor-follow/`; `cursor.json` is what was delivered.
 
 **"What did it find?" / "What should I worry about?"**
-1. `cvecondor status` lists the open and recent cases. Read `cases.json` for the rest.
+1. `cvecondor status` lists the open and waiting cases (`--closed` also lists the closed ones). Read `cases.json` for the rest.
 2. Sort by rating, then priority places, and lead with **act today**.
 3. For the install-time picture, run `cvecondor baseline`. If you save it, write it to the state dir, never into the repo: it lists vulnerabilities, and secret names with fingerprints.
 4. Say what is already handled (a PR is open, a workaround is in place, it waits for a release) separately from what needs them.
@@ -125,6 +125,8 @@ If the watcher's rating is only its first guess (no report yet), check reachabil
    - they are here, so tell them directly instead of writing to an outbox;
    - a yes from them in conversation lets you act beyond the case's mode for that step;
    - write your report (with its `## Message`, any `cvecondor-wait` block, and on the `split` path the `cvecondor-fixed` block) to a file, then run `cvecondor record <key> --file <report>`. That marks the case handled and makes the watcher track what it waits for, reopening the case when the fix ships, and open one case per place from the fixed releases.
+
+**"Dismiss it" / "close that".** `cvecondor close <key or CVE>` (an optional `--note` says why). The case stays in `cases.json`, closed as `dismissed`, and never reopens on its own — even if the advisory or the inventory changes. A closed case whose fix the inventory later proves reopens only when it closed as `fixed`; a dismissed one does not. To bring one back, say so: `cvecondor respond <key>` runs it again.
 
 **"Change what it watches, who gets told, or what it may do."**
 1. Edit the config (field reference in the README).

@@ -32,6 +32,7 @@ use crate::name::{ENV_PREFIX, NAME, VERSION};
 use crate::notify::{Notice, Notifier, SendResult, deliver_to, notifier_lines, select_notifiers, send_notice};
 use crate::relay;
 use crate::responder::{StartOptions, recover_responses, running_count, start_response_with, wait_running};
+use crate::retry;
 use crate::secrets::Exposure;
 use crate::state::{read_state, slug, with_lock, write_file_atomic, write_state};
 use crate::types::{Inventory, InventoryItem};
@@ -39,10 +40,9 @@ use crate::upstream::{FixedRelease, parse_fixed};
 use crate::util::{self, iso, parse_time};
 use crate::vendors::catalog::VENDORS;
 use crate::vendors::detect_vendors;
-use crate::retry;
 use crate::watch::{
-    Affected, AssessInput, Assessment, Case, CaseState, CycleDeps, CycleSummary, HandledBy, Known, Rating, ResponseRecord, ResponseState, Run, assess,
-    case_file, case_mode, merge_responses, prepare_case, read_responses, report_finished_batches, report_path, run_cycle,
+    Affected, AssessInput, Assessment, Case, CaseState, CaseStatus, CycleDeps, CycleSummary, HandledBy, Known, Rating, ResponseRecord, ResponseState, Run,
+    StatusReason, assess, case_file, case_mode, merge_responses, prepare_case, read_cases, read_responses, report_finished_batches, report_path, run_cycle,
 };
 
 fn help() -> String {
@@ -55,7 +55,7 @@ Usage: {NAME} <command> [--config FILE]
   cycle               one cycle now (refreshes a stale inventory first); waits for responders
   inventory [--out F] refresh the inventory now (all collectors, read-only)
   baseline [--out F]  what is vulnerable or exposed today: critical/high per place, secrets, vendors
-  status              last cycle, sources, collectors, open cases, unread inbox
+  status [--closed]   last cycle, sources, collectors, cases (open and waiting, closed with --closed), unread inbox
   inbox [--all] [--peek]
                       what the watcher kept for you since you last read it (everything not urgent), then marks it read
   vendors [--catalog [TERM]]  the vendors detected (and named in the config), with evidence and feeds;
@@ -74,10 +74,13 @@ Usage: {NAME} <command> [--config FILE]
                       run the configured responder on one case now (KEY: case key or CVE/GHSA id) and wait for it
   record KEY --file REPORT
                       record a case you handled yourself: its report, the cvecondor-wait block (what it waits for) and the
-                      cvecondor-fixed block (fixed releases per component: one case per place follows)
+                      cvecondor-fixed block (fixed releases per component: one case per place follows) and any
+                      cvecondor-pr block (pull requests to merge: the case waits on the user for them)
   follow [--once | --test] [--config FILE]
                       on your own machine: each urgent line from the watcher opens a session of your agent
                       (reads follow.json, not the watcher's config); --once polls once, --test sends a test line
+  close KEY [--note T]
+                      close a case you want nothing more about (dismissed; it never reopens on its own)
 
 Config: --config FILE, or {ENV_PREFIX}_CONFIG, or ~/.config/{NAME}/config.json"
     )
@@ -207,7 +210,10 @@ fn cycle_text(s: &CycleSummary) -> String {
         lines.push(format!("New cases: {}", s.new_cases.join(", ")));
     }
     if !s.reopened.is_empty() {
-        lines.push(format!("Reopened (fix shipped): {}", s.reopened.join(", ")));
+        lines.push(format!("Reopened: {}", s.reopened.join(", ")));
+    }
+    if !s.closed.is_empty() {
+        lines.push(format!("Closed (no longer matching the inventory): {}", s.closed.join(", ")));
     }
     if !s.dispatched.is_empty() {
         lines.push(format!("Dispatched: {}", s.dispatched.join(", ")));
@@ -286,7 +292,7 @@ fn queue_failures(config: &Config, cases: &IndexMap<String, Case>) -> Result<()>
 /// Folds finished responses into the cases now rather than at the next cycle. `None`: a cycle is running.
 fn merge_now(config: &Config) -> Result<Option<usize>> {
     with_lock(&config.state_dir, "cycle", || -> Result<usize> {
-        let mut cases: IndexMap<String, Case> = read_state(&config.state_dir, "cases.json").unwrap_or_default();
+        let mut cases: IndexMap<String, Case> = read_cases(&config.state_dir);
         let count = merge_responses(&config.state_dir, &mut cases, &iso(util::now()));
         write_state(&config.state_dir, "cases.json", &cases)?;
         queue_failures(config, &cases)?;
@@ -309,7 +315,7 @@ fn respond_now(config: &Config, key: Option<&str>, mode_flag: Option<&str>) -> R
     };
     let started = with_lock(&config.state_dir, "cycle", || -> Result<(String, Mode, PathBuf)> {
         let dir = &config.state_dir;
-        let mut cases: IndexMap<String, Case> = read_state(dir, "cases.json").unwrap_or_default();
+        let mut cases: IndexMap<String, Case> = read_cases(dir);
         let Some(inventory) = read_state::<Inventory>(dir, "inventory.json") else { bail!("no inventory yet: run {NAME} inventory") };
         let key = find_case(&cases, key)?;
         let now = util::now();
@@ -326,6 +332,7 @@ fn respond_now(config: &Config, key: Option<&str>, mode_flag: Option<&str>) -> R
         c.state = CaseState::Handled;
         c.handled_by = Some(HandledBy::Responder);
         c.handled_at = Some(iso(now));
+        crate::watch::settle(&mut c, CaseStatus::Open, None, String::new(), &iso(now));
         cases.insert(key.clone(), c);
         write_state(dir, "cases.json", &cases)?;
         Ok((key, mode, prepared.report))
@@ -344,7 +351,7 @@ fn record_report(config: &Config, key: Option<&str>, file: Option<&str>) -> Resu
     let text = redact(config, &fs::read_to_string(file).with_context(|| format!("read {file}"))?);
     let done = with_lock(&config.state_dir, "cycle", || -> Result<String> {
         let dir = &config.state_dir;
-        let mut cases: IndexMap<String, Case> = read_state(dir, "cases.json").unwrap_or_default();
+        let mut cases: IndexMap<String, Case> = read_cases(dir);
         let key = find_case(&cases, key)?;
         let now = util::now();
         let at = iso(now);
@@ -357,6 +364,7 @@ fn record_report(config: &Config, key: Option<&str>, file: Option<&str>) -> Resu
         fs::DirBuilder::new().recursive(true).mode(0o700).create(dir.join("reports"))?;
         write_file_atomic(Path::new(&report), &format!("{}\n", text.trim_end()))?;
         let waits = parse_waits(&text);
+        let prs = crate::fixes::parse_prs(&text);
         let fixed = parse_fixed(&text);
         let record = ResponseRecord {
             key: key.clone(),
@@ -365,6 +373,7 @@ fn record_report(config: &Config, key: Option<&str>, file: Option<&str>) -> Resu
             finished_at: Some(at.clone()),
             report: Some(report.clone()),
             waits: Some(waits.clone()),
+            prs: Some(prs.clone()),
             fixed: Some(fixed.clone()),
             triage: None,
             error: None,
@@ -384,12 +393,38 @@ fn record_report(config: &Config, key: Option<&str>, file: Option<&str>) -> Resu
         let describe = |waits: &[crate::fixes::FixWait]| waits.iter().map(describe_wait).collect::<Vec<_>>().join("; ");
         let or = |text: String, empty: &str| if text.is_empty() { empty.to_string() } else { text };
         Ok(format!(
-            "Recorded {key}. Report: {report}\nFrom your report: {}\nThe watcher now checks {} wait(s): {}\nFixed releases (the next cycle opens a case per place from them): {}",
+            "Recorded {key}. Report: {report}\nFrom your report: {}; {}\nThe watcher now checks {} wait(s): {}\nFixed releases (the next cycle opens a case per place from them): {}",
             or(describe(&waits), "no cvecondor-wait block"),
+            or(prs.join(", "), "no cvecondor-pr block"),
             tracked.len(),
             or(describe(tracked), "none"),
             or(fixed.iter().map(FixedRelease::describe).collect::<Vec<_>>().join("; "), "no cvecondor-fixed block")
         ))
+    })
+    .transpose()?;
+    Ok(done.unwrap_or_else(|| "A cycle is running; try again in a minute.".to_string()))
+}
+
+/// Closes a case the user dismissed: nothing more is asked of anyone for it, and the watcher never reopens it on
+/// its own. `close` settles it as `dismissed`; a queued retry is taken off.
+fn close_case(config: &Config, key: Option<&str>, note: Option<&str>) -> Result<String> {
+    let done = with_lock(&config.state_dir, "cycle", || -> Result<String> {
+        let dir = &config.state_dir;
+        let mut cases: IndexMap<String, Case> = read_cases(dir);
+        let key = find_case(&cases, key)?;
+        let now = iso(util::now());
+        let detail = note.filter(|n| !n.is_empty()).map_or_else(|| "dismissed by the user".to_string(), str::to_string);
+        let Some(c) = cases.get_mut(&key) else { bail!("no case {key}") };
+        if c.status() == CaseStatus::Closed {
+            return Ok(format!("{key} is already closed ({}).", c.status_reason().map_or("no reason recorded", StatusReason::as_str)));
+        }
+        crate::watch::settle(c, CaseStatus::Closed, Some(StatusReason::Dismissed), detail, &now);
+        c.updated_at = now;
+        write_state(dir, "cases.json", &cases)?;
+        let mut queue = retry::read(dir);
+        queue.done(&key);
+        retry::write(dir, &queue)?;
+        Ok(format!("Closed {key}: dismissed. It stays recorded ({NAME} status --closed lists it) and never reopens on its own."))
     })
     .transpose()?;
     Ok(done.unwrap_or_else(|| "A cycle is running; try again in a minute.".to_string()))
@@ -456,16 +491,18 @@ fn clip(text: &str, n: usize) -> String {
     text.chars().take(n).collect()
 }
 
-fn status(config: &Config) -> Result<String> {
+fn status(config: &Config, show_closed: bool) -> Result<String> {
     let dir = &config.state_dir;
     let feeds: IndexMap<String, FeedState> = read_state(dir, "feeds.json").unwrap_or_default();
     let inventory: Option<Inventory> = read_state(dir, "inventory.json");
     let last: Option<CycleSummary> = read_state(dir, "last-cycle.json");
-    let cases: Vec<Case> = read_state::<IndexMap<String, Case>>(dir, "cases.json").unwrap_or_default().into_values().collect();
+    let cases: Vec<Case> = read_cases(dir).into_values().collect();
     let errors: Vec<(&String, &FeedState)> = feeds.iter().filter(|(_, f)| f.error.as_deref().is_some_and(|e| !e.is_empty())).collect();
-    let mut open: Vec<&Case> = cases.iter().filter(|c| matches!(c.state, CaseState::Pending | CaseState::Judging | CaseState::Handled)).collect();
-    open.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-    let count = |state: CaseState| cases.iter().filter(|c| c.state == state).count();
+    let by_status = |status: CaseStatus| {
+        let mut list: Vec<&Case> = cases.iter().filter(|c| c.status() == status).collect();
+        list.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        list
+    };
     let classifier = match &config.classifier {
         Some(c) => format!("classifier.dev ({}, {})", c.model, if c.api_key.is_some() { "your key" } else { "anonymous free tier" }),
         None => "off (no key): prose advisories by name match only".to_string(),
@@ -544,48 +581,85 @@ fn status(config: &Config) -> Result<String> {
     let queue = retry::read(dir);
     if !queue.entries.is_empty() {
         let next = queue.entries.values().map(|e| e.next_at.as_str()).min().unwrap_or_default();
-        let paused = queue.paused_until.as_deref().filter(|_| queue.paused(util::now())).map(|t| format!("; the agent is out of quota until {t}")).unwrap_or_default();
+        let paused =
+            queue.paused_until.as_deref().filter(|_| queue.paused(util::now())).map(|t| format!("; the agent is out of quota until {t}")).unwrap_or_default();
         lines.push(format!("Retry queue: {} case(s) waiting for another responder run, the next not before {next}{paused}", queue.entries.len()));
     }
-    lines.push(format!("Open cases: {}", if open.is_empty() { "none".to_string() } else { open.len().to_string() }));
-    for c in open.iter().take(25) {
-        let tags = format!(
+    let (open, waiting, closed) = (by_status(CaseStatus::Open), by_status(CaseStatus::Waiting), by_status(CaseStatus::Closed));
+    lines.push(format!(
+        "Cases: {} open, {} waiting, {} closed{}",
+        open.len(),
+        waiting.len(),
+        closed.len(),
+        if closed.is_empty() || show_closed { String::new() } else { " (`status --closed` lists them)".to_string() }
+    ));
+    let handled = |c: &Case| match c.handled_by {
+        Some(by) if c.handled_at.as_deref().is_some_and(|a| !a.is_empty()) => format!(
+            " ({} {})",
+            if by == HandledBy::Notice {
+                "notified".to_string()
+            } else {
+                format!("by {}", serde_json::to_value(by).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default())
+            },
+            ago(c.handled_at.as_deref())
+        ),
+        _ => String::new(),
+    };
+    let tags = |c: &Case| {
+        format!(
             "{}{}{}{}",
             c.assessment.as_ref().map(|a| format!("{}; ", a.rating.as_str())).unwrap_or_default(),
             c.severity.as_str(),
             if c.exploited == Some(true) { ", exploited" } else { "" },
             if c.priority == Some(true) { ", priority" } else { "" }
-        );
-        let handled = match c.handled_by {
-            Some(by) => format!(
-                " ({} {})",
-                if by == HandledBy::Notice {
-                    "notified".to_string()
-                } else {
-                    format!("by {}", serde_json::to_value(by).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default())
-                },
-                ago(c.handled_at.as_deref())
-            ),
-            None => String::new(),
-        };
-        lines.push(format!("  {} [{tags}] {}{handled}: {}", c.key, c.state.as_str(), clip(&c.title, 100)));
-        lines.push(format!(
-            "    {}{}{}{}",
-            c.reason,
-            c.waiting_for.as_deref().filter(|w| !w.is_empty()).map(|w| format!("; waiting for {} fix(es)", w.len())).unwrap_or_default(),
-            c.report.as_deref().filter(|r| !r.is_empty()).map(|r| format!("; report {r}")).unwrap_or_default(),
-            match queue.entries.get(&c.key) {
-                Some(e) => format!("; queued to retry after {} (attempt {}): {}", e.next_at, e.attempts + 1, e.reason),
-                None => c.dispatch_error.as_deref().filter(|e| !e.is_empty()).map(|e| format!("; dispatch failed: {e}")).unwrap_or_default(),
-            }
-        ));
+        )
+    };
+    if !open.is_empty() {
+        lines.push("Open:".to_string());
+        for c in open.iter().take(25) {
+            lines.push(format!("  {} [{tags}] {}{}: {}", c.key, c.state.as_str(), handled(c), clip(&c.title, 100), tags = tags(c)));
+            lines.push(format!(
+                "    {}{}{}{}",
+                c.reason,
+                c.waiting_for.as_deref().filter(|w| !w.is_empty()).map(|w| format!("; waiting for {} fix(es)", w.len())).unwrap_or_default(),
+                c.report.as_deref().filter(|r| !r.is_empty()).map(|r| format!("; report {r}")).unwrap_or_default(),
+                match queue.entries.get(&c.key) {
+                    Some(e) => format!("; queued to retry after {} (attempt {}): {}", e.next_at, e.attempts + 1, e.reason),
+                    None => c.dispatch_error.as_deref().filter(|e| !e.is_empty()).map(|e| format!("; dispatch failed: {e}")).unwrap_or_default(),
+                }
+            ));
+        }
+        if open.len() > 25 {
+            lines.push(format!("  … {} more", open.len() - 25));
+        }
     }
+    if !waiting.is_empty() {
+        lines.push("Waiting:".to_string());
+        for c in waiting.iter().take(25) {
+            let on = c.status_reason().map_or_else(String::new, |r| format!(" on {}: {}", r.as_str(), c.status_detail()));
+            lines.push(format!("  {} [{tags}] waiting{on}{}: {}", c.key, handled(c), clip(&c.title, 80), tags = tags(c)));
+        }
+        if waiting.len() > 25 {
+            lines.push(format!("  … {} more", waiting.len() - 25));
+        }
+    }
+    let closed_why = |why: StatusReason| closed.iter().filter(|c| c.status_reason() == Some(why)).count();
     lines.push(format!(
-        "Recorded, not notified: {} below high, {} judged not affected, {} unsure (the install baseline's lower findings are in `baseline`, not cases)",
-        count(CaseState::Watch),
-        count(CaseState::NotAffected),
-        count(CaseState::Unsure)
+        "Closed: {} ({} fixed, {} not applicable, {} dismissed)",
+        closed.len(),
+        closed_why(StatusReason::Fixed),
+        closed_why(StatusReason::NotApplicable),
+        closed_why(StatusReason::Dismissed)
     ));
+    if show_closed {
+        for c in closed.iter().take(25) {
+            let why = c.status_reason().map_or_else(|| "closed".to_string(), |r| format!("closed, {}", r.as_str()));
+            lines.push(format!("  {} [{why}]{}: {}", c.key, handled(c), clip(&c.title, 80)));
+        }
+        if closed.len() > 25 {
+            lines.push(format!("  … {} more", closed.len() - 25));
+        }
+    }
     lines.push(format!("Inbox: {} unread (`{NAME} inbox` shows them and marks them read)", unread(dir, false)?.len()));
     Ok(lines.join("\n"))
 }
@@ -856,8 +930,11 @@ fn replay(config: &Config, opts: &Opts) -> Result<String> {
         )
     };
     let inventory = match &opts.inventory {
-        Some(file) => serde_json::from_str::<Inventory>(&fs::read_to_string(file).with_context(|| format!("read {file}"))?).with_context(|| format!("parse {file}"))?,
-        None => read_state::<Inventory>(&config.state_dir, "inventory.json").ok_or_else(|| anyhow!("no inventory yet: run {NAME} inventory (or pass --inventory FILE)"))?,
+        Some(file) => {
+            serde_json::from_str::<Inventory>(&fs::read_to_string(file).with_context(|| format!("read {file}"))?).with_context(|| format!("parse {file}"))?
+        }
+        None => read_state::<Inventory>(&config.state_dir, "inventory.json")
+            .ok_or_else(|| anyhow!("no inventory yet: run {NAME} inventory (or pass --inventory FILE)"))?,
     };
     let mut body = match &opts.file {
         Some(file) => fs::read_to_string(file).with_context(|| format!("read {file}"))?,
@@ -910,7 +987,7 @@ fn replay(config: &Config, opts: &Opts) -> Result<String> {
         if opts.respond {
             wait_running();
         }
-        let cases: Vec<Case> = read_state::<IndexMap<String, Case>>(&dir, "cases.json").unwrap_or_default().into_values().collect();
+        let cases: Vec<Case> = read_cases(&dir).into_values().collect();
         let mut out = vec![format!(
             "Replay of {} against the inventory of {} ({} items): {} new item(s), {} case(s)",
             source.id,
@@ -991,6 +1068,8 @@ struct Opts {
     catalog: bool,
     mode: Option<String>,
     all: bool,
+    closed: bool,
+    note: Option<String>,
     peek: bool,
     env_name: Option<String>,
     wait: Option<u64>,
@@ -1020,6 +1099,8 @@ fn parse_args(args: Vec<OsString>) -> Result<(Opts, Vec<String>)> {
             Long("no-wait") => opts.no_wait = true,
             Long("catalog") => opts.catalog = true,
             Long("all") => opts.all = true,
+            Long("closed") => opts.closed = true,
+            Long("note") => opts.note = Some(parser.value()?.string()?),
             Long("peek") => opts.peek = true,
             Long("env") => opts.env_name = Some(parser.value()?.string()?),
             Long("wait") => opts.wait = Some(parser.value()?.parse()?),
@@ -1117,7 +1198,7 @@ fn run(args: Vec<OsString>) -> Result<i32> {
             }
         },
         "baseline" => write(&baseline(&config)?)?,
-        "status" => say(&status(&config)?),
+        "status" => say(&status(&config, opts.closed)?),
         "inbox" => {
             let entries = unread(&config.state_dir, opts.all)?;
             if let (Some(last), false) = (entries.last(), opts.peek) {
@@ -1172,6 +1253,7 @@ fn run(args: Vec<OsString>) -> Result<i32> {
         "replay" => say(&replay(&config, &opts)?),
         "respond" => say(&respond_now(&config, positionals.get(1).map(String::as_str), opts.mode.as_deref())?),
         "record" => say(&record_report(&config, positionals.get(1).map(String::as_str), opts.file.as_deref())?),
+        "close" => say(&close_case(&config, positionals.get(1).map(String::as_str), opts.note.as_deref())?),
         _ => {
             say(&help());
             return Ok(2);

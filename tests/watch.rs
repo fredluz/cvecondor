@@ -20,7 +20,9 @@ use cvecondor::state::{read_state, slug, write_state};
 use cvecondor::types::Inventory;
 use cvecondor::util::{iso, parse_time};
 use cvecondor::vendors::UserVendor;
-use cvecondor::watch::{Affected, AssessInput, Case, CaseState, CycleDeps, CycleSummary, JudgeVendorFn, RespondFn, Run, assess, case_mode, run_cycle};
+use cvecondor::watch::{
+    Affected, AssessInput, Case, CaseState, CaseStatus, CycleDeps, CycleSummary, JudgeVendorFn, RespondFn, Run, StatusReason, assess, case_mode, run_cycle,
+};
 use indexmap::IndexMap;
 use jiff::Timestamp;
 use regex::Regex;
@@ -761,8 +763,12 @@ fn nothing_starts_before_the_agents_reset_and_a_newer_event_for_a_queued_case_re
     h.put_case(reopened);
     h.advance(12 * 3_600_000);
     h.cycle();
-    let started: Vec<(String, bool)> =
-        h.responded().into_iter().zip(h.runs.lock().unwrap_or_else(PoisonError::into_inner).iter().map(|r| r.retry)).map(|((c, _), retry)| (c.key, retry)).collect();
+    let started: Vec<(String, bool)> = h
+        .responded()
+        .into_iter()
+        .zip(h.runs.lock().unwrap_or_else(PoisonError::into_inner).iter().map(|r| r.retry))
+        .map(|((c, _), retry)| (c.key, retry))
+        .collect();
     assert_eq!(started.len(), 2, "{started:?}");
     assert!(started.iter().all(|(_, retry)| !retry), "both are new events, run as such: {started:?}");
     assert!(cvecondor::retry::read(&h.config.state_dir).entries.is_empty(), "the newer event took the queued retry's place");
@@ -989,7 +995,8 @@ fn brotli_stack() -> Inventory {
 fn split_response(h: &Harness, key: &str, fixed: &[&str], finished_at: &str) {
     let block = fixed.join("\n");
     let report = h.config.state_dir.join(format!("{}-split-{}.md", slug(key), finished_at.replace(':', "")));
-    std::fs::write(&report, format!("## Message\nPlan it: one case per place from the fixed releases.\n\n```cvecondor-fixed\n{block}\n```\n")).expect("writes the report");
+    std::fs::write(&report, format!("## Message\nPlan it: one case per place from the fixed releases.\n\n```cvecondor-fixed\n{block}\n```\n"))
+        .expect("writes the report");
     let text = std::fs::read_to_string(&report).expect("reads the report");
     let record = json!({
         "key": key, "state": "done", "startedAt": "2026-10-21T08:13:00.000Z", "finishedAt": finished_at, "report": report,
@@ -1093,4 +1100,157 @@ fn fixed_releases_named_upstream_open_one_case_per_place_with_the_release_it_mov
     assert!(docs.reason.starts_with("fix released: 1.0.9-2+deb12u1"), "{}", docs.reason);
     let known = h.cases()["CVE-2026-111497"].fixed_releases.clone().unwrap_or_default();
     assert_eq!(known.len(), 6, "a later line replaces its component's, the others stay: {known:?}");
+}
+
+/// A case written before `status` fields existed settles by what was already recorded.
+#[test]
+fn state_files_without_a_status_migrate_on_load() {
+    let mut net = Net::new("2026-10-20T00:00:00Z");
+    net.osv.insert("left-pad".into(), vec![stub("GHSA-aaaa", "2026-01-01T00:00:00Z")]);
+    let h = Harness::new(net, claude());
+    h.put_case(case("CVE-2026-1", &[("github", "repo:acme/api")], json!({ "state": "handled", "triage": { "path": "propose", "why": "a fix PR is open" } })));
+    h.put_case(case("CVE-2026-2", &[("github", "repo:acme/api")], json!({ "state": "not-affected" })));
+    h.put_case(case("CVE-2026-3", &[("github", "repo:acme/api")], json!({ "state": "pending", "reason": "high" })));
+    h.put_case(case("CVE-2026-4", &[("github", "repo:acme/api")], json!({ "state": "watch", "reason": "low: recorded, not notified" })));
+    h.cycle();
+    let cases = h.cases();
+    let get = |k: &str| cases[k].clone();
+    assert_eq!((get("CVE-2026-1").status(), get("CVE-2026-1").status_reason()), (CaseStatus::Waiting, Some(StatusReason::User)));
+    assert_eq!((get("CVE-2026-2").status(), get("CVE-2026-2").status_reason()), (CaseStatus::Closed, Some(StatusReason::NotApplicable)));
+    assert_eq!((get("CVE-2026-3").status(), get("CVE-2026-3").status_reason()), (CaseStatus::Open, None));
+    assert_eq!((get("CVE-2026-4").status(), get("CVE-2026-4").status_reason()), (CaseStatus::Waiting, Some(StatusReason::Watching)));
+}
+
+/// A case whose advisory no longer matches the inventory closes by itself, and reopens if it matches again.
+#[test]
+fn a_case_closes_fixed_when_the_inventory_stops_matching_and_reopens_if_it_matches_again() {
+    let net = Net::new("2026-10-20T00:00:00Z");
+    let h = Harness::new(net, claude());
+    h.put_case(case(
+        "CVE-2026-9000",
+        &[("github", "repo:acme/api")],
+        json!({
+            "state": "handled", "handledBy": "responder", "triage": { "path": "propose", "why": "a fix PR is open" },
+            "aliases": ["GHSA-gone"], "sources": ["osv:npm"], "osvIds": { "GHSA-gone": "2026-01-01T00:00:00Z" },
+            "targets": ["github repo:acme/api left-pad 1.0.0 (package-lock.json) fixed in 1.0.1"]
+        }),
+    ));
+    h.cycle(); // GHSA-gone is not among the hits: the match is gone.
+    let c = &h.cases()["CVE-2026-9000"];
+    assert_eq!((c.status(), c.status_reason()), (CaseStatus::Closed, Some(StatusReason::Fixed)), "{c:?}");
+    assert!(h.responded().is_empty(), "nothing dispatches for a closed case");
+
+    h.net(|n| {
+        n.osv_head = "2026-10-22T00:00:00Z".into();
+        n.osv.insert("left-pad".into(), vec![stub("GHSA-gone", "2026-10-22T00:00:00Z")]);
+        n.records.insert(
+            "GHSA-gone".into(),
+            json!({ "id": "GHSA-gone", "modified": "2026-10-22T00:00:00Z", "aliases": ["CVE-2026-9000"], "summary": "left-pad RCE", "database_specific": high(), "affected": [] }),
+        );
+    });
+    let summary = h.cycle();
+    assert_eq!(summary.reopened, ["CVE-2026-9000"]);
+    let c = &h.cases()["CVE-2026-9000"];
+    assert_eq!((c.status(), c.state), (CaseStatus::Open, CaseState::Handled), "{c:?}");
+    assert_eq!(h.responded().len(), 1, "the re-matched case is dispatched again");
+}
+
+/// A dismissed case never comes back on its own.
+#[test]
+fn a_dismissed_case_stays_closed_when_it_still_matches() {
+    let mut net = Net::new("2026-10-20T00:00:00Z");
+    net.osv.insert("left-pad".into(), vec![stub("GHSA-here", "2026-01-01T00:00:00Z")]);
+    net.records.insert(
+        "GHSA-here".into(),
+        json!({ "id": "GHSA-here", "modified": "2026-01-01T00:00:00Z", "aliases": ["CVE-2026-9001"], "summary": "left-pad RCE", "database_specific": high(), "affected": [] }),
+    );
+    let h = Harness::new(net, claude());
+    h.put_case(case(
+        "CVE-2026-9001",
+        &[("github", "repo:acme/api")],
+        json!({
+            "state": "watch", "reason": "low: recorded, not notified", "severity": "low",
+            "status": "closed", "statusReason": "dismissed", "statusDetail": "dismissed by the user",
+            "aliases": ["GHSA-here"], "sources": ["osv:npm"], "osvIds": { "GHSA-here": "2026-01-01T00:00:00Z" },
+            "targets": ["github repo:acme/api left-pad 1.0.0 (package-lock.json)"]
+        }),
+    ));
+    h.cycle();
+    let c = &h.cases()["CVE-2026-9001"];
+    assert_eq!((c.status(), c.status_reason()), (CaseStatus::Closed, Some(StatusReason::Dismissed)), "{c:?}");
+    assert!(h.responded().is_empty());
+}
+
+/// The responder's triage settles the case: propose waits on the user, an update that opened a pull request
+/// waits on its merge, an update applied everywhere waits for the inventory to show the fix.
+#[test]
+fn a_finished_response_settles_the_case_by_its_triage_and_pull_requests() {
+    let net = Net::new("2026-10-20T00:00:00Z");
+    let h = Harness::new(net, claude());
+    h.net(|n| {
+        n.osv_head = "2026-10-21T09:00:00Z".into();
+        n.osv.insert("left-pad".into(), vec![stub("GHSA-aaaa", "2026-10-21T09:00:00Z")]);
+        n.records.insert(
+            "GHSA-aaaa".into(),
+            json!({ "id": "GHSA-aaaa", "modified": "2026-10-21T09:00:00Z", "aliases": ["CVE-2026-1111"], "summary": "left-pad RCE", "database_specific": high(), "affected": [] }),
+        );
+    });
+    h.put_case(case(
+        "CVE-2026-7",
+        &[("github", "repo:acme/api")],
+        json!({ "state": "handled", "handledBy": "responder", "handledAt": "2026-10-20T10:00:00Z" }),
+    ));
+    h.cycle();
+    let done = |h: &Harness, key: &str, report: &str, triage: Value| {
+        let file = h.config.state_dir.join(format!("{key}.md"));
+        std::fs::write(&file, report).expect("writes the report");
+        write_state(
+            &h.config.state_dir,
+            &format!("responses/{}.json", slug(key)),
+            &json!({ "key": key, "state": "done", "startedAt": "2026-10-21T09:00:00Z", "finishedAt": "2026-10-21T09:30:00Z",
+                "report": file, "prs": cvecondor::fixes::parse_prs(report), "triage": triage }),
+        )
+        .expect("writes the response");
+    };
+    done(
+        &h,
+        "CVE-2026-7",
+        "## Message\nUpdated, fix PR open.\n\n```cvecondor-pr\nhttps://github.com/acme/api/pull/42\n```\n",
+        json!({ "path": "update", "why": "fixed release" }),
+    );
+    done(&h, "CVE-2026-1111", "## Message\nA proposal is ready.\n", json!({ "path": "propose", "why": "your call" }));
+    h.cycle();
+    let cases = h.cases();
+    let pr_case = &cases["CVE-2026-7"];
+    assert_eq!((pr_case.status(), pr_case.status_reason()), (CaseStatus::Waiting, Some(StatusReason::User)), "{pr_case:?}");
+    assert_eq!(pr_case.status_detail(), "pull request to merge: https://github.com/acme/api/pull/42");
+    assert_eq!(pr_case.pull_requests.as_deref(), Some(&["https://github.com/acme/api/pull/42".to_string()][..]));
+    let proposed = &cases["CVE-2026-1111"];
+    assert_eq!((proposed.status(), proposed.status_reason()), (CaseStatus::Waiting, Some(StatusReason::User)));
+    assert_eq!(proposed.status_detail(), "your decision");
+}
+
+/// An update applied on the spot (no pull request) waits on the inventory to show the fix, not on the user.
+#[test]
+fn an_update_without_a_pull_request_waits_on_the_inventory() {
+    let net = Net::new("2026-10-20T00:00:00Z");
+    let h = Harness::new(net, claude());
+    h.put_case(case(
+        "CVE-2026-8",
+        &[("github", "repo:acme/api")],
+        json!({ "state": "handled", "handledBy": "responder", "handledAt": "2026-10-20T10:00:00Z" }),
+    ));
+    let report = h.config.state_dir.join("applied.md");
+    std::fs::write(&report, "## Message\nUpdated in place.").expect("writes the report");
+    write_state(
+        &h.config.state_dir,
+        "responses/cve-2026-8.json",
+        &json!({ "key": "CVE-2026-8", "state": "done", "startedAt": "2026-10-21T09:00:00Z", "finishedAt": "2026-10-21T09:30:00Z",
+            "report": report, "prs": [], "triage": { "path": "update", "why": "fixed release" } }),
+    )
+    .expect("writes the response");
+    h.cycle();
+    let c = &h.cases()["CVE-2026-8"];
+    assert_eq!((c.status(), c.status_reason()), (CaseStatus::Waiting, Some(StatusReason::Applied)), "{c:?}");
+    assert_eq!(c.status_detail(), "the inventory to show the fix");
 }

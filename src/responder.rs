@@ -45,8 +45,7 @@ const CLAUDE_NO_WAITS: &str = "ScheduleWakeup,Monitor,CronCreate";
 /// a run that schedules a wake-up stays open long after its report.
 pub static PRESETS: LazyLock<HashMap<(Agent, Mode), Vec<String>>> = LazyLock::new(|| {
     let argv = |parts: &[&str]| -> Vec<String> { parts.iter().map(|s| (*s).to_string()).collect() };
-    let full_claude =
-        argv(&["claude", "-p", "--output-format", "text", "--dangerously-skip-permissions", "--disallowedTools", CLAUDE_NO_WAITS]);
+    let full_claude = argv(&["claude", "-p", "--output-format", "text", "--dangerously-skip-permissions", "--disallowedTools", CLAUDE_NO_WAITS]);
     let full_codex = argv(&["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check", "-"]);
     let full_omp = argv(&["omp", "-p", "--no-session", "@{prompt}"]);
     HashMap::from([
@@ -596,6 +595,7 @@ pub fn start_response_with(config: &Config, c: &Case, case_file: &Path, mode: Mo
         finished_at: None,
         report: None,
         waits: None,
+        prs: None,
         fixed: None,
         triage: None,
         error: None,
@@ -736,6 +736,7 @@ impl Job {
         record.finished_at = Some(iso(util::now()));
         record.report = c.report.clone();
         record.waits = Some(parse_waits(&report));
+        record.prs = Some(crate::fixes::parse_prs(&report));
         record.fixed = Some(parse_fixed(&report));
         record.triage = triage.clone();
         if !ok {
@@ -903,6 +904,7 @@ mod tests {
             finished_at: None,
             report: None,
             waits: None,
+            prs: None,
             fixed: None,
             triage: None,
             error: None,

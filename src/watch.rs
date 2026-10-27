@@ -65,6 +65,77 @@ impl CaseState {
     }
 }
 
+/// What a case needs, for the user: work by the responder (`open`), an outside event (`waiting`), or nothing
+/// (`closed`). The triage `state` stays the machinery; this is the lifecycle `status` reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CaseStatus {
+    Open,
+    Waiting,
+    Closed,
+}
+
+impl CaseStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Waiting => "waiting",
+            Self::Closed => "closed",
+        }
+    }
+}
+
+/// What `waiting` waits on, or why `closed` is done. `closed_at` re-matches only ever reopen a `fixed` case:
+/// `dismissed` and `not-applicable` stay closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StatusReason {
+    /// A fixed release or advisory change upstream (the `waitingFor` tracking, a watched advisory).
+    Upstream,
+    /// The user's decision: a fix PR to merge, a proposal to approve.
+    User,
+    /// A stopped service to bring back.
+    Service,
+    /// The response applied the fix; it closes once the inventory shows the fixed version.
+    Applied,
+    /// Recorded below the floor, or told with no responder: watched for a worse signal or a fix.
+    Watching,
+    /// The inventory no longer matches the vulnerable version.
+    Fixed,
+    /// Triage found it does not apply here (incl. `unsure`, `already-handled`, `split`).
+    NotApplicable,
+    /// The user dismissed it (`cvecondor close`).
+    Dismissed,
+}
+
+impl StatusReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Upstream => "upstream",
+            Self::User => "user",
+            Self::Service => "service",
+            Self::Applied => "applied",
+            Self::Watching => "watching",
+            Self::Fixed => "fixed",
+            Self::NotApplicable => "not-applicable",
+            Self::Dismissed => "dismissed",
+        }
+    }
+
+    fn default_detail(self) -> &'static str {
+        match self {
+            Self::Upstream => "a fixed release upstream",
+            Self::User => "your decision",
+            Self::Service => "a stopped service to bring back",
+            Self::Applied => "the inventory to show the fix",
+            Self::Watching => "a worse signal or a fix",
+            Self::Fixed => "the inventory no longer matches",
+            Self::NotApplicable => "not applicable here",
+            Self::Dismissed => "dismissed by the user",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Place {
     pub host: String,
@@ -173,6 +244,120 @@ pub struct Case {
     /// The case whose fixed releases opened this one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub split_from: Option<String>,
+    /// Pull requests the responder opened and left for the user to merge (a `cvecondor-pr` report block).
+    /// While one is open the case waits on the user, not on the inventory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_requests: Option<Vec<String>>,
+    /// The lifecycle for the user: `open` (the responder still has work), `waiting` (something outside must
+    /// happen, `status_reason` says what), `closed` (nothing left). Missing on state files from before case
+    /// states: `Case::status` derives it and a cycle writes it back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<CaseStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_reason: Option<StatusReason>,
+    /// The waiting or close reason in words; absent: the reason's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_at: Option<String>,
+}
+
+impl Case {
+    /// The lifecycle state; derived for cases written before it existed (see `migrate_case`).
+    pub fn status(&self) -> CaseStatus {
+        self.status.unwrap_or_else(|| self.derived().0)
+    }
+
+    /// The kind of what it waits on or why it closed; `None` while open.
+    pub fn status_reason(&self) -> Option<StatusReason> {
+        self.status_reason.or_else(|| match self.status() {
+            CaseStatus::Open => None,
+            _ => self.derived().1,
+        })
+    }
+
+    pub fn status_detail(&self) -> String {
+        self.status_detail.clone().or_else(|| self.status_reason().map(|r| r.default_detail().to_string())).unwrap_or_default()
+    }
+
+    /// Closed cases the watch may still reopen by itself: only `fixed` (the inventory matched it again). What the
+    /// user dismissed or triage set aside stays closed.
+    pub fn reopenable(&self) -> bool {
+        self.status() == CaseStatus::Closed && self.status_reason() == Some(StatusReason::Fixed)
+    }
+
+    /// The derived lifecycle for a case with no recorded one: triage paths settle handled cases, the rest comes
+    /// from the triage state (`migrate_case` also looks at waits).
+    fn derived(&self) -> (CaseStatus, Option<StatusReason>, String) {
+        if self.state == CaseState::Handled
+            && let Some(triage) = &self.triage
+        {
+            let (status, reason, detail) = settled(triage, self.pull_requests.as_deref().unwrap_or_default());
+            return (status, reason, detail);
+        }
+        match self.state {
+            CaseState::Pending | CaseState::Judging => (CaseStatus::Open, None, String::new()),
+            CaseState::Watch => (CaseStatus::Waiting, Some(StatusReason::Watching), self.reason.clone()),
+            CaseState::Unsure | CaseState::NotAffected => (CaseStatus::Closed, Some(StatusReason::NotApplicable), self.reason.clone()),
+            CaseState::Handled => (
+                CaseStatus::Waiting,
+                Some(if self.waiting_for.as_deref().is_some_and(|w| !w.is_empty()) { StatusReason::Upstream } else { StatusReason::Watching }),
+                String::new(),
+            ),
+        }
+    }
+}
+
+/// The status the responder's triage leaves a case in: the path's outcome, with its reason. Open pull
+/// requests make any waiting path wait on the user's merge instead.
+fn settled(triage: &Triage, prs: &[String]) -> (CaseStatus, Option<StatusReason>, String) {
+    let (status, reason, detail) = match triage.path {
+        TriagePath::Update | TriagePath::Distrust => (CaseStatus::Waiting, StatusReason::Applied, "the inventory to show the fix".to_string()),
+        TriagePath::Propose => (CaseStatus::Waiting, StatusReason::User, "your decision".to_string()),
+        TriagePath::NotExploitable | TriagePath::Workaround | TriagePath::Breach => {
+            (CaseStatus::Waiting, StatusReason::Upstream, "a fixed release upstream".to_string())
+        }
+        TriagePath::Shutdown => (CaseStatus::Waiting, StatusReason::Service, "the service to come back".to_string()),
+        TriagePath::NotAffected | TriagePath::AlreadyHandled | TriagePath::Split => (CaseStatus::Closed, StatusReason::NotApplicable, triage.why.clone()),
+    };
+    if status == CaseStatus::Waiting && !prs.is_empty() {
+        return (CaseStatus::Waiting, Some(StatusReason::User), crate::fixes::prs_detail(prs));
+    }
+    (status, Some(reason), detail)
+}
+
+/// A lifecycle change: state, reason and detail, stamped. `None` on the reason keeps the case's.
+pub fn settle(c: &mut Case, status: CaseStatus, reason: Option<StatusReason>, detail: impl Into<String>, at: &str) {
+    c.status = Some(status);
+    c.status_reason = reason;
+    c.status_detail = Some(detail.into()).filter(|d| !d.is_empty());
+    c.status_at = Some(at.to_string());
+}
+
+/// Back to open: the reason and detail go, the case needs the responder or the user again.
+fn mark_open(c: &mut Case, at: &str) {
+    settle(c, CaseStatus::Open, None, String::new(), at);
+}
+
+/// Materialises the lifecycle on a case loaded from a state file written before it existed, so the next write
+/// keeps it (and `status` never has to derive it twice). Cases already carrying a status are untouched.
+fn migrate_case(c: &mut Case) {
+    if c.status.is_some() {
+        return;
+    }
+    let (status, reason, detail) = c.derived();
+    c.status = Some(status);
+    c.status_reason = reason;
+    c.status_detail = if detail.is_empty() { None } else { Some(detail) };
+}
+
+/// `cases.json` with each case's lifecycle materialised.
+pub fn read_cases(dir: &Path) -> IndexMap<String, Case> {
+    let mut cases: IndexMap<String, Case> = read_state(dir, "cases.json").unwrap_or_default();
+    for c in cases.values_mut() {
+        migrate_case(c);
+    }
+    cases
 }
 
 /// `known.json`: what the watcher has already seen.
@@ -212,6 +397,9 @@ pub struct ResponseRecord {
     pub report: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waits: Option<Vec<FixWait>>,
+    /// Pull requests its report opened for the user to merge (a `cvecondor-pr` block).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prs: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub triage: Option<Triage>,
     /// The fixed releases its report names (a `<NAME>-fixed` block).
@@ -275,6 +463,9 @@ pub struct CycleSummary {
     #[serde(default)]
     pub queued: Vec<String>,
     pub reopened: Vec<String>,
+    /// Cases the inventory closed this cycle (their match is gone) — `reopened` has the other direction.
+    #[serde(default)]
+    pub closed: Vec<String>,
     pub secrets_told: usize,
     pub vendors: usize,
     pub errors: Vec<String>,
@@ -402,6 +593,30 @@ pub fn merge_responses(dir: &Path, cases: &mut IndexMap<String, Case>, at: &str)
         }
         if record.triage.is_some() {
             c.triage = record.triage.clone();
+        }
+        if let Some(prs) = record.prs.as_deref().filter(|p| !p.is_empty()) {
+            let known = c.pull_requests.get_or_insert_with(Vec::new);
+            for url in prs {
+                if !known.contains(url) {
+                    known.push(url.clone());
+                }
+            }
+        }
+        // The outcome settles the case; a failed run and a case the user already closed keep theirs.
+        if record.state == ResponseState::Done && c.status() != CaseStatus::Closed {
+            let (status, reason, detail) = match &c.triage {
+                Some(triage) => settled(triage, c.pull_requests.as_deref().unwrap_or_default()),
+                None if !c.pull_requests.as_deref().unwrap_or_default().is_empty() => {
+                    (CaseStatus::Waiting, Some(StatusReason::User), crate::fixes::prs_detail(c.pull_requests.as_deref().unwrap_or_default()))
+                }
+                None if c.waiting_for.as_deref().is_some_and(|w| !w.is_empty()) => (
+                    CaseStatus::Waiting,
+                    Some(StatusReason::Upstream),
+                    format!("a fixed release upstream ({})", c.waiting_for.iter().flatten().map(describe_wait).collect::<Vec<_>>().join("; ")),
+                ),
+                None => (CaseStatus::Waiting, Some(StatusReason::Watching), "its response is on record".to_string()),
+            };
+            settle(c, status, reason, detail, at);
         }
         merged += 1;
     }
@@ -707,7 +922,7 @@ fn merge_places(a: &[Place], b: &[Place]) -> Vec<Place> {
 
 /// A case with its required fields; the caller sets the rest.
 fn new_case(key: String, kind: CaseKind, title: String, state: CaseState, reason: String, severity: Severity, at: &str) -> Case {
-    Case {
+    let mut c = Case {
         key,
         kind,
         title,
@@ -747,7 +962,14 @@ fn new_case(key: String, kind: CaseKind, title: String, state: CaseState, reason
         triage: None,
         fixed_releases: None,
         split_from: None,
-    }
+        pull_requests: None,
+        status: None,
+        status_reason: None,
+        status_detail: None,
+        status_at: None,
+    };
+    migrate_case(&mut c);
+    c
 }
 
 /// The first case, in order, that has this key or one of these ids among its aliases.
@@ -755,12 +977,33 @@ fn by_alias(cases: &IndexMap<String, Case>, ids: &[String]) -> Option<String> {
     cases.values().find(|c| ids.iter().any(|id| c.key == *id || c.aliases.contains(id))).map(|c| c.key.clone())
 }
 
-/// Puts the case back in front of the user: a fix shipped or was announced.
+/// Puts the case back in front of the user: a fix shipped or was announced. A closed case stays so: `fixed`
+/// ones re-match through `reconcile` instead, `not-applicable` and `dismissed` never do.
 fn reopen(c: &mut Case, summary: &mut CycleSummary, at: &str, reason: String) {
+    if c.status() == CaseStatus::Closed {
+        return;
+    }
     c.state = CaseState::Pending;
     c.fix_available = true;
     c.reopened_at = Some(at.to_string());
     c.reason = reason;
+    c.previous_report = c.report.clone().or_else(|| c.previous_report.take());
+    c.updated_at = at.to_string();
+    mark_open(c, at);
+    summary.reopened.push(c.key.clone());
+}
+
+/// The case matched the inventory again after being closed as fixed.
+fn match_again(c: &mut Case, summary: &mut CycleSummary, at: &str) {
+    // A watch-state case was recorded below the floor, not told: re-matching does not make it loud.
+    if c.state == CaseState::Watch {
+        settle(c, CaseStatus::Waiting, Some(StatusReason::Watching), c.reason.clone(), at);
+    } else {
+        c.state = CaseState::Pending;
+        c.reason = "matches the inventory again".to_string();
+        mark_open(c, at);
+    }
+    c.reopened_at = Some(at.to_string());
     c.previous_report = c.report.clone().or_else(|| c.previous_report.take());
     c.updated_at = at.to_string();
     summary.reopened.push(c.key.clone());
@@ -820,6 +1063,9 @@ struct Cycle<'a, 'b> {
     cases: IndexMap<String, Case>,
     known: Known,
     queue: Queue,
+    /// OSV ids matching the inventory this cycle, and the families asked (`reconcile` reads them).
+    matched: IndexSet<String>,
+    queried: IndexSet<String>,
 }
 
 /// One watch cycle. `run_cycle` does not lock: callers hold `state::with_lock(dir, "cycle", …)`.
@@ -840,9 +1086,11 @@ pub fn run_cycle(config: &Config, deps: &CycleDeps) -> Result<CycleSummary> {
         now,
         at,
         summary,
-        cases: read_state(dir, "cases.json").unwrap_or_default(),
+        cases: read_cases(dir),
         known: read_state(dir, "known.json").unwrap_or_default(),
         queue: retry::read(dir),
+        matched: IndexSet::new(),
+        queried: IndexSet::new(),
     };
     let records: Mutex<IndexMap<String, OsvRecord>> = Mutex::new(read_state(dir, "osv-records.json").unwrap_or_default());
     let mut rotation = RotationMap::new();
@@ -860,6 +1108,14 @@ pub fn run_cycle(config: &Config, deps: &CycleDeps) -> Result<CycleSummary> {
             record_error(config, &mut cy.summary, "retry notice", &e);
         }
         cy.summary.queued = absorbed.queued;
+    }
+    // A case whose run did not finish has work again, whatever its last merged triage said.
+    for key in cy.queue.entries.keys() {
+        if let Some(c) = cy.cases.get_mut(key)
+            && c.status() == CaseStatus::Waiting
+        {
+            mark_open(c, &cy.at);
+        }
     }
 
     let vendors = detect_vendors(&inventory, config);
@@ -898,6 +1154,7 @@ pub fn run_cycle(config: &Config, deps: &CycleDeps) -> Result<CycleSummary> {
     cy.vendor_phase(&poll, &vendors, &rotation);
     cy.fix_phase();
     cy.releases_phase();
+    cy.reconcile();
     cy.dispatch()?;
     cy.secrets_phase();
 
@@ -981,6 +1238,12 @@ impl Cycle<'_, '_> {
             }
         };
         self.summary.osv_queried = due.clone();
+        for family in &due {
+            self.queried.insert(family.clone());
+        }
+        for hit in hits.values() {
+            self.matched.insert(hit.id.clone());
+        }
         let mut work: Vec<Work> = Vec::new();
         for family in &due {
             let baseline = !is_set(&self.known.osv_queried_at.get(family).cloned());
@@ -1051,7 +1314,7 @@ impl Cycle<'_, '_> {
             }
             if c.state == CaseState::Handled && !c.fix_available && !fixes.is_empty() {
                 reopen(c, &mut self.summary, &at, format!("fix released: {}; apply it and remove the temporary mitigation", fixes.join(", ")));
-            } else if c.state == CaseState::Watch {
+            } else if c.state == CaseState::Watch && c.status() != CaseStatus::Closed {
                 let decision = package_decision(severity, !fixes.is_empty(), exploited, &targets, malicious);
                 if decision.state == CaseState::Pending {
                     c.state = decision.state;
@@ -1059,6 +1322,7 @@ impl Cycle<'_, '_> {
                     c.severity = severity;
                     c.fix_available = !fixes.is_empty();
                     c.exploited = Some(exploited);
+                    mark_open(c, &at);
                 }
             }
             return;
@@ -1385,20 +1649,22 @@ impl Cycle<'_, '_> {
                 }
                 if exploited && c.exploited != Some(true) {
                     c.exploited = Some(true);
-                    if c.state == CaseState::Watch {
+                    if c.state == CaseState::Watch && c.status() != CaseStatus::Closed {
                         c.state = CaseState::Pending;
                         c.reason = "now listed as exploited in the wild (CISA)".to_string();
+                        mark_open(c, &at);
                     }
                 }
                 if c.state == CaseState::Handled && !c.fix_available && !fixes.is_empty() {
                     reopen(c, &mut self.summary, &at, format!("fix released: {}; apply it and remove the temporary mitigation", fixes.join(", ")));
                 } else {
                     c.fix_available |= !fixes.is_empty();
-                    if c.state == CaseState::Watch && !targets.is_empty() {
+                    if c.state == CaseState::Watch && !targets.is_empty() && c.status() != CaseStatus::Closed {
                         let decision = package_decision(c.severity, c.fix_available, c.exploited == Some(true), &targets, false);
                         if decision.state == CaseState::Pending {
                             c.state = decision.state;
                             c.reason = decision.reason;
+                            mark_open(c, &at);
                         }
                     }
                 }
@@ -1466,9 +1732,10 @@ impl Cycle<'_, '_> {
             c.updated_at = at.clone();
             if item.exploited == Some(true) && c.exploited != Some(true) {
                 c.exploited = Some(true);
-                if c.state == CaseState::Watch {
+                if c.state == CaseState::Watch && c.status() != CaseStatus::Closed {
                     c.state = CaseState::Pending;
                     c.reason = "now listed as exploited in the wild (CISA KEV)".to_string();
+                    mark_open(c, &at);
                 }
             }
             if c.state == CaseState::Handled && !c.fix_available && FIX_WORDS.is_match(&format!("{} {}", item.title, item.text)) {
@@ -1551,18 +1818,24 @@ impl Cycle<'_, '_> {
                 Some(Verdict::Affected) => {
                     c.state = CaseState::Pending;
                     c.reason = format!("{how}: affected ({terms})");
+                    mark_open(&mut c, &at);
                 }
                 Some(Verdict::Unsure) if high_signal => {
                     c.state = CaseState::Pending;
                     c.reason = format!("{how}: unsure; high-signal source");
+                    mark_open(&mut c, &at);
                 }
                 Some(Verdict::Unsure) => {
                     c.state = CaseState::Unsure;
                     c.reason = format!("{how}: unsure");
+                    let detail = c.reason.clone();
+                    settle(&mut c, CaseStatus::Closed, Some(StatusReason::NotApplicable), detail, &at);
                 }
                 Some(Verdict::NotAffected) => {
                     c.state = CaseState::NotAffected;
                     c.reason = format!("{how}: not affected ({terms})");
+                    let detail = c.reason.clone();
+                    settle(&mut c, CaseStatus::Closed, Some(StatusReason::NotApplicable), detail, &at);
                 }
                 None => {}
             }
@@ -1661,7 +1934,7 @@ impl Cycle<'_, '_> {
         let keys: Vec<String> = self
             .cases
             .values()
-            .filter(|c| c.state == CaseState::Handled && c.waiting_for.as_ref().is_some_and(|w| !w.is_empty()))
+            .filter(|c| c.state == CaseState::Handled && c.status() != CaseStatus::Closed && c.waiting_for.as_ref().is_some_and(|w| !w.is_empty()))
             .map(|c| c.key.clone())
             .collect();
         let json = |w: &FixWait| serde_json::to_string(w).unwrap_or_default();
@@ -1739,11 +2012,15 @@ impl Cycle<'_, '_> {
                 t.fixed_in = to.map(|to| vec![to]);
                 groups.entry((format!("{} {}", item.host, item.r#where), moves)).or_default().push(t);
             }
-            for ((place, moves), targets) in groups {
-                let key = format!("{} @ {place}{}", from.key, if moves { " (move line)" } else { "" });
+            for ((place, moves), targets) in &groups {
+                let key = format!("{} @ {place}{}", from.key, if *moves { " (move line)" } else { "" });
                 let fixes = unique(targets.iter().flat_map(|t| t.fixed_in.iter().flatten().cloned()));
                 if let Some(c) = self.cases.get_mut(&key) {
-                    if c.state == CaseState::Handled && !c.fix_available && !fixes.is_empty() {
+                    // The place is below the fix again: only a case the inventory itself closed comes back.
+                    if c.reopenable() {
+                        c.targets = targets.iter().map(describe_target).collect();
+                        match_again(c, &mut self.summary, &at);
+                    } else if c.state == CaseState::Handled && !c.fix_available && !fixes.is_empty() {
                         c.targets = targets.iter().map(describe_target).collect();
                         reopen(c, &mut self.summary, &at, format!("fix released: {}; apply it and remove the temporary mitigation", fixes.join(", ")));
                     }
@@ -1752,7 +2029,7 @@ impl Cycle<'_, '_> {
                 let name = place_name(&targets[0].item.host, &targets[0].item.r#where);
                 let items = targets.iter().map(|t| format!("{} {}", t.item.name, t.item.version)).collect::<Vec<_>>().join(", ");
                 let unfixed = targets.iter().any(|t| t.fixed_in.is_none());
-                let (title, reason) = if moves {
+                let (title, reason) = if *moves {
                     (
                         format!("{}: {items}: its line gets no fix, move to a supported line ({} or later) in {name}", from.key, fixes.join(" / ")),
                         "its release line gets no fix: moving to a supported line is the update".to_string(),
@@ -1777,12 +2054,67 @@ impl Cycle<'_, '_> {
                 c.urls = from.urls.clone();
                 c.sources = from.sources.clone();
                 c.targets = targets.iter().map(describe_target).collect();
-                c.affected = Some(affected_of(&targets));
-                c.places = places_of(&targets);
+                c.affected = Some(affected_of(targets));
+                c.places = places_of(targets);
                 c.priority = Some(targets.iter().any(|t| t.priority));
                 c.terms = Some(unique(targets.iter().map(|t| t.item.name.clone())));
                 c.split_from = Some(from.key.clone());
                 self.open(c);
+            }
+
+            // A child whose place is gone matched no longer: the whole group is on a fixed release.
+            for key in self.cases.values().filter(|c| c.split_from.as_deref() == Some(from.key.as_str())).map(|c| c.key.clone()).collect::<Vec<_>>() {
+                let child_place = key.strip_prefix(&format!("{} @ ", from.key)).unwrap_or_default();
+                let present = groups.keys().any(|(place, moves)| child_place == format!("{place}{}", if *moves { " (move line)" } else { "" }).as_str());
+                if !present
+                    && let Some(c) = self.cases.get_mut(&key)
+                    && c.status() != CaseStatus::Closed
+                {
+                    c.updated_at = at.clone();
+                    settle(c, CaseStatus::Closed, Some(StatusReason::Fixed), "the place is on a fixed release".to_string(), &at);
+                    self.summary.closed.push(key);
+                }
+            }
+            // The case that named the fixed releases is done once nothing the releases reach is below them.
+            if groups.is_empty()
+                && let Some(c) = self.cases.get_mut(&from.key)
+                && c.status() == CaseStatus::Waiting
+            {
+                c.updated_at = at.clone();
+                settle(c, CaseStatus::Closed, Some(StatusReason::Fixed), "everything the fixed releases reach is on a fixed release".to_string(), &at);
+                self.summary.closed.push(from.key.clone());
+            }
+        }
+    }
+
+    /// The inventory decides: an advisory-mapped case whose OSV families were all queried and whose ids no
+    /// longer match anything it runs is closed as fixed; one the inventory closed comes back if it matches
+    /// again. Cases nothing in OSV tracks (prose, Node index, vendor incidents, CVE-list ranges) keep their
+    /// status: whether they still match is unknown.
+    fn reconcile(&mut self) {
+        let at = self.at.clone();
+        let keys: Vec<String> = self.cases.values().filter(|c| c.osv_ids.as_ref().is_some_and(|ids| !ids.is_empty())).map(|c| c.key.clone()).collect();
+        for key in keys {
+            let Some(c) = self.cases.get(&key) else { continue };
+            let families: Vec<&str> = c.sources.iter().filter_map(|s| s.strip_prefix("osv:")).collect();
+            // A family the cycle did not ask about says nothing this round.
+            if families.is_empty() || !families.iter().all(|f| self.queried.contains(*f)) {
+                continue;
+            }
+            let ids: Vec<&String> = c.osv_ids.iter().flatten().map(|(id, _)| id).chain(c.aliases.iter()).collect();
+            let still = ids.iter().any(|id| self.matched.contains(*id));
+            if still {
+                if c.reopenable()
+                    && let Some(c) = self.cases.get_mut(&key)
+                {
+                    match_again(c, &mut self.summary, &at);
+                }
+            } else if c.status() != CaseStatus::Closed
+                && let Some(c) = self.cases.get_mut(&key)
+            {
+                c.updated_at = at.clone();
+                settle(c, CaseStatus::Closed, Some(StatusReason::Fixed), "the inventory no longer matches it".to_string(), &at);
+                self.summary.closed.push(key);
             }
         }
     }
@@ -1795,7 +2127,8 @@ impl Cycle<'_, '_> {
         let dir = config.state_dir.as_path();
         let at = self.at.clone();
         let notify = &self.deps.notify;
-        let mut pending: Vec<String> = self.cases.values().filter(|c| c.state == CaseState::Pending).map(|c| c.key.clone()).collect();
+        let mut pending: Vec<String> =
+            self.cases.values().filter(|c| c.state == CaseState::Pending && c.status() != CaseStatus::Closed).map(|c| c.key.clone()).collect();
         let mut prepared: IndexMap<String, Prepared> = IndexMap::new();
         for key in &pending {
             let mut c = self.cases[key.as_str()].clone();
@@ -1917,6 +2250,16 @@ impl Cycle<'_, '_> {
                         c.state = CaseState::Handled;
                         c.handled_by = Some(HandledBy::Notice);
                         c.handled_at = Some(at.clone());
+                        // Told, nothing running: it waits for the user or for the tracked fixes.
+                        let (reason, detail) = if c.waiting_for.as_deref().is_some_and(|w| !w.is_empty()) {
+                            (
+                                StatusReason::Upstream,
+                                format!("a fixed release upstream ({})", c.waiting_for.iter().flatten().map(describe_wait).collect::<Vec<_>>().join("; ")),
+                            )
+                        } else {
+                            (StatusReason::Watching, "it was told in its batch message".to_string())
+                        };
+                        settle(c, CaseStatus::Waiting, Some(reason), detail, &at);
                     }
                     write_file_atomic(&p.report, &format!("{}\n", case_notice(&self.cases[key.as_str()], &p.file).text))?;
                 }
@@ -1965,7 +2308,9 @@ impl Cycle<'_, '_> {
             .due(now)
             .iter()
             .filter(|e| !running.contains(&e.key))
-            .filter_map(|e| self.cases.get(&e.key).filter(|c| c.state != CaseState::Pending).map(|c| (c.clone(), e.failed_at.clone())))
+            .filter_map(|e| {
+                self.cases.get(&e.key).filter(|c| c.state != CaseState::Pending && c.status() != CaseStatus::Closed).map(|c| (c.clone(), e.failed_at.clone()))
+            })
             .collect();
         due.sort_by(|(a, a_failed), (b, b_failed)| retry_order(a, b).then(a_failed.cmp(b_failed)));
         for (mut c, _) in due {
@@ -1974,7 +2319,8 @@ impl Cycle<'_, '_> {
             }
             *responding += 1;
             let key = c.key.clone();
-            let started = prepare_case(config, &mut c, self.inventory, &self.cases, now).and_then(|p| respond(&c, &p.file, p.mode, Run { batch: false, retry: true }));
+            let started =
+                prepare_case(config, &mut c, self.inventory, &self.cases, now).and_then(|p| respond(&c, &p.file, p.mode, Run { batch: false, retry: true }));
             self.cases.insert(key.clone(), c);
             match started {
                 Ok(()) => {
@@ -2400,7 +2746,7 @@ fn report_batches(
     for b in batches.iter_mut().filter(|b| is_set(&b.told_at) && !is_set(&b.reported_at)) {
         let members: Vec<&Case> = b.keys.iter().filter_map(|k| cases.get(k)).filter(|c| c.batch.as_deref() == Some(b.id.as_str())).collect();
         if members.iter().any(|c| {
-            c.state == CaseState::Pending
+            (c.state == CaseState::Pending && c.status() != CaseStatus::Closed)
                 || (c.handled_by == Some(HandledBy::Responder) && responses.get(&c.key).is_some_and(|r| r.state == ResponseState::Running))
         }) {
             continue;
@@ -2432,7 +2778,7 @@ fn report_batches(
 
 /// For a one-shot cycle that waited for its responses: their batch reports now, not at the next run.
 pub fn report_finished_batches(dir: &Path, notify: &Notifier, at: &str) -> Result<usize> {
-    let cases: IndexMap<String, Case> = read_state(dir, "cases.json").unwrap_or_default();
+    let cases: IndexMap<String, Case> = read_cases(dir);
     let mut batches: Vec<Batch> = read_state(dir, "batches.json").unwrap_or_default();
     let sent = report_batches(dir, &cases, &retry::read(dir), &mut batches, notify, at, &mut |_, _| {});
     write_state(dir, "batches.json", &batches)?;

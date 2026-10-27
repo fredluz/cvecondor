@@ -70,6 +70,40 @@ pub fn parse_waits(report: &str) -> Vec<FixWait> {
     out
 }
 
+/// The fenced ```` ```<NAME>-pr ```` blocks of a report.
+static PR_BLOCK: LazyLock<Regex> = LazyLock::new(|| Regex::new(&format!(r"(?s)```{}-pr\s*\n(.*?)```", regex::escape(NAME))).expect("valid regex"));
+
+/// Pull requests the responder opened and left for the user to merge, from a fenced block tagged
+/// `<NAME>-pr`: one per line, a bare `https://…` URL or `{"url": "…"}`. A case with one open waits on
+/// the user, not on the inventory.
+pub fn parse_prs(report: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for block in PR_BLOCK.captures_iter(report) {
+        for line in block[1].split('\n') {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let url = if line.starts_with("http://") || line.starts_with("https://") {
+                Some(line.to_string())
+            } else if line.starts_with('{') {
+                serde_json::from_str::<Value>(line).ok().and_then(|v| v.get("url").and_then(Value::as_str).map(str::to_string))
+            } else {
+                None
+            };
+            if let Some(url) = url {
+                out.push(url);
+            }
+        }
+    }
+    out
+}
+
+/// What a case with open pull requests waits on the user for.
+pub fn prs_detail(prs: &[String]) -> String {
+    format!("pull request{} to merge: {}", if prs.len() == 1 { "" } else { "s" }, prs.join(", "))
+}
+
 static REVISION: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"-r[0-9]+$").expect("valid regex"));
 
 /// The newest plain release (no letters once a leading `v` and a `-rN` revision are gone) at or above `floor`.

@@ -87,6 +87,17 @@ If something stays open until a release ships, declare it so the watcher checks 
 - For an image, name the tag that moves when the fix ships (the line's tag, such as `node:22-alpine`, or `latest`), never the pinned tag in use, and only an `env` the image actually sets (`PHP_VERSION`, `NODE_VERSION`, `PYTHON_VERSION`). An image that sets none (Bun's) is waited on through its package instead (`npm:bun`).
 - `atLeast` is the fixed version on the release line the artifact uses (an image on nginx 1.31.x waits for 1.31.7, not the stable line's 1.30.6). Check that the artifact's current value is below it, or the wait is met at once and the case stops tracking the fix.
 
+## Pull requests you opened
+
+Every pull request you leave for the user to merge — the fix on `update` or `distrust`, the blocking test on `workaround` — goes in the report in a fenced block tagged `cvecondor-pr`, one per line, the bare URL or `{"url": "…"}`:
+
+```cvecondor-pr
+https://github.com/acme/api/pull/42
+```
+
+A case with an open pull request waits on the user (to merge), not on the inventory: `status` lists it under Waiting with the URL. Merging and deploying it is what lets the inventory close the case as fixed.
+Your triage also settles the case's status the user sees: `update` and `distrust` leave it waiting on the inventory to show the fix (then it closes itself as fixed) — unless the run ends in an open pull request, which waits on the user's merge; `propose` waits on the user's decision, `not-exploitable`, `workaround` and `breach` wait on a fix upstream, `shutdown` waits on the service coming back, and `not-affected`, `already-handled` and `split` close it. It comes back only if the fix it waited for ships or — closed as fixed — the inventory matches it again.
+
 ## The report
 
 Write `report.md` in your working directory. Start with the section the user receives at the end:
