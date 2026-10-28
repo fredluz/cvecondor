@@ -69,7 +69,7 @@ Replace the watcher's first guess (`case.assessment`) with one of these, plus on
 An update or a workaround is offered as a pull request only after this, in this order:
 1. **On the base branch:** run each touched package's tests and build, and the repo's CI steps locally if it defines them (the `run:` steps of `.github/workflows/*.yml`: install, lint, test, build). Note what passes and what fails.
 2. **On your branch,** the same runs, on the updated version (`npx -y node@<fixed>`, the new image, the new lockfile).
-3. **Compare.** The same results or better: push and open the pull request. **New failures:** stop (`update.md`, "If the update breaks the build or the tests").
+3. **Compare.** The same results or better: push and open the pull request. **New failures:** port the code (`update.md`, "The fix includes the code changes it needs").
 
 The pull request body, the line you send (if any) and the report's `## Message` give the result in plain words: "tests: 12 pass, same as main; build ok; e2e not run", "tests: same 5 failures as before, build ok", or "untested: no tests in this repo". A major-version jump is named there too: "major: jsonwebtoken 8 → 9".
 
