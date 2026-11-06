@@ -25,6 +25,7 @@ use crate::cvelist;
 use crate::feeds::{FeedState, NEWS_SOURCES, NodeIndexEntry, PollOptions, PollResult, ProseItem, SOURCES, SourceDef, poll_sources};
 use crate::fixes::{FixWait, WaitPackage, check_wait, describe_wait};
 use crate::http::Fetch;
+use crate::judged::Judged;
 use crate::matching::{
     OsvAffected, OsvHit, OsvRecord, ProseCandidate, Severity, Target, Verdict, at_least, carried, classify, describe_secret, describe_target, judge,
     node_index_matches, osv_family, osv_fixes, osv_query, osv_record, osv_severity, place_name, prose_candidates, secrets_at_risk, target_for,
@@ -269,6 +270,16 @@ pub struct Case {
     /// there means a state file from before this field — the old behaviour: it reopens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_prior: Option<ServicePrior>,
+    /// Where this case stands as judged: set from `judging` when a response finishes it. A case that still stands
+    /// as judged (`Judged::covers`) is not judged again when it returns by a route that changes nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub judged: Option<Judged>,
+    /// The case as the running (or last started) response saw it; it becomes `judged` when that response finishes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub judging: Option<Judged>,
+    /// The titles of the advisories this case groups, when it groups several (one response judges them all).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advisories: Option<Vec<String>>,
 }
 
 /// The lifecycle a `waiting` case was in when its service went down: `service_phase` keeps it, and when the
@@ -583,6 +594,26 @@ fn merge_waits(a: Option<&[FixWait]>, b: &[FixWait]) -> Vec<FixWait> {
     out.into_values().collect()
 }
 
+/// What a case with a finished response is waiting on: the triage path's outcome (open pull requests make it wait on
+/// the merge); with no triage on record, the pull requests, the tracked fixes, or just the watching.
+fn outcome(c: &Case) -> (CaseStatus, StatusReason, String) {
+    let prs = c.pull_requests.as_deref().unwrap_or_default();
+    let (status, reason, detail) = match &c.triage {
+        Some(triage) => {
+            let (status, reason, detail) = settled(triage, prs);
+            (status, reason.unwrap_or(StatusReason::Watching), detail)
+        }
+        None if !prs.is_empty() => (CaseStatus::Waiting, StatusReason::User, crate::fixes::prs_detail(prs)),
+        None if c.waiting_for.as_deref().is_some_and(|w| !w.is_empty()) => (
+            CaseStatus::Waiting,
+            StatusReason::Upstream,
+            format!("a fixed release upstream ({})", c.waiting_for.iter().flatten().map(describe_wait).collect::<Vec<_>>().join("; ")),
+        ),
+        None => (CaseStatus::Waiting, StatusReason::Watching, "its response is on record".to_string()),
+    };
+    (status, reason, detail)
+}
+
 /// Folds finished responses (their report and what the case now waits for) into the cases.
 pub fn merge_responses(dir: &Path, cases: &mut IndexMap<String, Case>, at: &str) -> usize {
     let mut merged = 0;
@@ -623,23 +654,20 @@ pub fn merge_responses(dir: &Path, cases: &mut IndexMap<String, Case>, at: &str)
                 }
             }
         }
+        // A finished run is what the case was judged by: the facts it saw stand until something material changes.
+        // (A `split` hands the places over to the cases the watcher opens from the fixed releases: nothing was judged here.)
+        if record.state == ResponseState::Done {
+            let split = c.triage.as_ref().is_some_and(|t| t.path == TriagePath::Split);
+            if let Some(judging) = c.judging.take().filter(|_| !split) {
+                c.judged = Some(judging);
+            }
+        }
         // The outcome settles the case; a failed run and a case the user already closed keep theirs. A fresh
         // settle supersedes any wait a service hold remembered: a stale `service_prior` never comes back.
         if record.state == ResponseState::Done && c.status() != CaseStatus::Closed {
             c.service_prior = None;
-            let (status, reason, detail) = match &c.triage {
-                Some(triage) => settled(triage, c.pull_requests.as_deref().unwrap_or_default()),
-                None if !c.pull_requests.as_deref().unwrap_or_default().is_empty() => {
-                    (CaseStatus::Waiting, Some(StatusReason::User), crate::fixes::prs_detail(c.pull_requests.as_deref().unwrap_or_default()))
-                }
-                None if c.waiting_for.as_deref().is_some_and(|w| !w.is_empty()) => (
-                    CaseStatus::Waiting,
-                    Some(StatusReason::Upstream),
-                    format!("a fixed release upstream ({})", c.waiting_for.iter().flatten().map(describe_wait).collect::<Vec<_>>().join("; ")),
-                ),
-                None => (CaseStatus::Waiting, Some(StatusReason::Watching), "its response is on record".to_string()),
-            };
-            settle(c, status, reason, detail, at);
+            let (status, reason, detail) = outcome(c);
+            settle(c, status, Some(reason), detail, at);
         }
         merged += 1;
     }
@@ -992,6 +1020,9 @@ fn new_case(key: String, kind: CaseKind, title: String, state: CaseState, reason
         status_detail: None,
         status_at: None,
         service_prior: None,
+        judged: None,
+        judging: None,
+        advisories: None,
     };
     migrate_case(&mut c);
     c
@@ -1026,8 +1057,22 @@ fn reopen(c: &mut Case, summary: &mut CycleSummary, at: &str, reason: String) {
     raise(c, summary, at, reason);
 }
 
-/// The case matched the inventory again after being closed as fixed.
-fn match_again(c: &mut Case, summary: &mut CycleSummary, at: &str) {
+/// Back to what the case was waiting on, nothing for the responder: the run on record stands. A case never closes by
+/// coming back (a triage that closed it is not applied twice): it watches.
+fn settle_back(c: &mut Case, at: &str, why: &str) {
+    let (status, reason, detail) = outcome(c);
+    let (status, reason, detail) = if status == CaseStatus::Closed { (CaseStatus::Waiting, StatusReason::Watching, why.to_string()) } else { (status, reason, detail) };
+    c.updated_at = at.to_string();
+    settle(c, status, Some(reason), detail, at);
+}
+
+/// The case matched the inventory again after being closed as fixed. Judged already at the version and exposure it has
+/// now, and nothing material changed (no exploitation, no fix): it is not judged again.
+fn match_again(c: &mut Case, summary: &mut CycleSummary, at: &str, inventory: &Inventory) {
+    if c.state != CaseState::Watch && c.judged.as_ref().is_some_and(|j| j.covers(c, inventory)) {
+        settle_back(c, at, "matches the inventory again; judged already at this version and exposure");
+        return;
+    }
     // A watch-state case was recorded below the floor, not told: re-matching does not make it loud.
     if c.state == CaseState::Watch {
         settle(c, CaseStatus::Waiting, Some(StatusReason::Watching), c.reason.clone(), at);
@@ -1061,8 +1106,9 @@ fn case_service(c: &Case, states: &IndexMap<String, crate::service::Resolution>)
 }
 
 /// Re-reads each case's service and keeps `waiting: service` current: a down service waits on the service
-/// (its real wait kept in `service_prior`), a service back returns it to that wait — it reopens only when
-/// there was nothing to return to (it was open, or its run never finished).
+/// (its real wait kept in `service_prior`), a service back returns it to that wait. With no wait remembered (a state
+/// file from before `service_prior`) it settles back from the run on record, the same: a service that stopped and
+/// started changes nothing to judge. Only a `shutdown` (the responder stopped it) reopens when the service is back.
 pub fn service_phase(config: &Config, inventory: &Inventory, cases: &mut IndexMap<String, Case>, summary: &mut CycleSummary, at: &str, now: Timestamp) {
     let states = service_states(config, inventory, now);
     for c in cases.values_mut() {
@@ -1086,9 +1132,12 @@ pub fn service_phase(config: &Config, inventory: &Inventory, cases: &mut IndexMa
                 if let Some(prior) = c.service_prior.take() {
                     // It had somewhere to wait before: it goes back there, nothing for the responder.
                     settle(c, prior.status, Some(prior.reason), prior.detail.unwrap_or_else(|| prior.reason.default_detail().to_string()), at);
+                } else if c.state == CaseState::Handled && !c.triage.as_ref().is_some_and(|t| t.path == TriagePath::Shutdown) {
+                    // Nothing was remembered, but the run on record says what it waited on: back to that.
+                    settle_back(c, at, "its service is back; nothing else changed");
                 } else {
-                    // Back (or no longer provable as down) with nothing recorded to return to: the responder
-                    // picks it up again (it was open, or its run never finished).
+                    // A service the responder stopped is back (or nothing is on record to settle by): the responder
+                    // picks it up again.
                     c.state = CaseState::Pending;
                     c.reason = "its service is back".to_string();
                     c.reopened_at = Some(at.to_string());
@@ -1245,7 +1294,6 @@ pub fn run_cycle(config: &Config, deps: &CycleDeps) -> Result<CycleSummary> {
     let kev: HashSet<String> = feeds.get("cisa-kev").and_then(|f| f.seen.as_ref()).map(|seen| seen.keys().cloned().collect()).unwrap_or_default();
 
     cy.osv_phase(&poll, &kev, &records);
-    cy.group_by_place();
     cy.node_phase(&poll);
     let cve_candidates = cy.cvelist_phase(&poll, &kev);
     cy.prose_phase(&poll, cve_candidates);
@@ -1253,6 +1301,7 @@ pub fn run_cycle(config: &Config, deps: &CycleDeps) -> Result<CycleSummary> {
     cy.fix_phase();
     cy.releases_phase();
     cy.reconcile();
+    cy.group_by_place();
     cy.dispatch()?;
     cy.secrets_phase();
 
@@ -1458,19 +1507,46 @@ impl Cycle<'_, '_> {
         self.open(c);
     }
 
-    /// Many advisories in one place (a new deployment, the install baseline): one case, and one response, per place.
+    /// Advisories waiting for their first response that share a place (a new deployment, the install baseline, a wave
+    /// of CVEs on one package): one case, and one response, for the place. The response judges every advisory in it,
+    /// so none is skipped, but the place is read once. Only what nobody has judged yet is grouped: a case already
+    /// handled or reopened keeps its own history.
     fn group_by_place(&mut self) {
-        let mut by_place: IndexMap<String, Vec<String>> = IndexMap::new();
-        for key in &self.summary.new_cases {
-            let Some(c) = self.cases.get(key) else { continue };
-            if c.state != CaseState::Pending || !c.sources.first().is_some_and(|s| s.starts_with("osv:")) {
+        struct Group {
+            keys: Vec<String>,
+            places: HashSet<String>,
+            baseline: bool,
+        }
+        let mut groups: Vec<Group> = Vec::new();
+        for c in self.cases.values() {
+            let first_response = c.state == CaseState::Pending
+                && c.status() != CaseStatus::Closed
+                && c.kind == CaseKind::Vulnerability
+                && c.sources.first().is_some_and(|s| s.starts_with("osv:"))
+                && c.handled_at.is_none()
+                && c.reopened_at.is_none()
+                && c.triage.is_none()
+                && c.judged.is_none();
+            if !first_response || c.places.is_empty() {
                 continue;
             }
-            let mut keys: Vec<String> = c.places.iter().map(place_key).collect();
-            keys.sort();
-            by_place.entry(keys.join(" + ")).or_default().push(key.clone());
+            let places: HashSet<String> = c.places.iter().map(place_key).collect();
+            let baseline = c.baseline == Some(true);
+            // Every group it shares a place with joins it (and each other).
+            let mut joined = Group { keys: vec![c.key.clone()], places, baseline };
+            let mut rest: Vec<Group> = Vec::new();
+            for g in groups {
+                if g.baseline == baseline && !g.places.is_disjoint(&joined.places) {
+                    joined.keys.splice(0..0, g.keys);
+                    joined.places.extend(g.places);
+                } else {
+                    rest.push(g);
+                }
+            }
+            rest.push(joined);
+            groups = rest;
         }
-        for (place, mut group) in by_place {
+        for Group { keys: mut group, places, .. } in groups {
             if group.len() < 2 {
                 continue;
             }
@@ -1479,9 +1555,13 @@ impl Cycle<'_, '_> {
                 let (a, b) = (&self.cases[a.as_str()], &self.cases[b.as_str()]);
                 (b.exploited == Some(true)).cmp(&(a.exploited == Some(true))).then(severity_order(a.severity).cmp(&severity_order(b.severity)))
             });
-            let titles: Vec<String> = group.iter().map(|k| self.cases[k.as_str()].title.clone()).collect();
-            let more = if group.len() > 3 { "; …" } else { "" };
-            let title = format!("{} vulnerabilities in {place}: {}{more}", group.len(), titles.iter().take(3).cloned().collect::<Vec<_>>().join("; "));
+            // A member that is itself a group brings the advisories it already grouped.
+            let titles: Vec<String> =
+                group.iter().flat_map(|k| self.cases[k.as_str()].advisories.clone().unwrap_or_else(|| vec![self.cases[k.as_str()].title.clone()])).collect();
+            let mut place: Vec<String> = places.into_iter().collect();
+            place.sort();
+            let more = if titles.len() > 3 { "; …" } else { "" };
+            let title = format!("{} vulnerabilities in {}: {}{more}", titles.len(), place.join(" + "), titles.iter().take(3).cloned().collect::<Vec<_>>().join("; "));
             let lead_key = group[0].clone();
             let mut rest: Vec<Case> = Vec::new();
             for key in &group[1..] {
@@ -1491,10 +1571,18 @@ impl Cycle<'_, '_> {
             }
             let Some(lead) = self.cases.get_mut(&lead_key) else { continue };
             lead.title = title;
+            lead.advisories = Some(titles);
             for c in rest {
                 lead.aliases = unique(lead.aliases.iter().cloned().chain(std::iter::once(c.key.clone())).chain(c.aliases.iter().cloned()));
                 lead.urls = unique(lead.urls.iter().cloned().chain(c.urls.iter().cloned()));
                 lead.targets = unique(lead.targets.iter().cloned().chain(c.targets.iter().cloned()));
+                lead.places = merge_places(&lead.places, &c.places);
+                lead.terms = Some(unique(lead.terms.iter().flatten().cloned().chain(c.terms.iter().flatten().cloned())));
+                lead.sources = unique(lead.sources.iter().cloned().chain(c.sources.iter().cloned()));
+                lead.priority = match (lead.priority, c.priority) {
+                    (None, None) => None,
+                    (a, b) => Some(a == Some(true) || b == Some(true)),
+                };
                 let mut affected = lead.affected.take().unwrap_or_default();
                 affected.extend(c.affected.iter().flatten().cloned());
                 affected.truncate(80);
@@ -2163,7 +2251,7 @@ impl Cycle<'_, '_> {
                     // The place is below the fix again: only a case the inventory itself closed comes back.
                     if c.reopenable() {
                         c.targets = targets.iter().map(describe_target).collect();
-                        match_again(c, &mut self.summary, &at);
+                        match_again(c, &mut self.summary, &at, inventory);
                     } else if c.state == CaseState::Handled && !c.fix_available && !fixes.is_empty() {
                         c.targets = targets.iter().map(describe_target).collect();
                         reopen(c, &mut self.summary, &at, format!("fix released: {}; apply it and remove the temporary mitigation", fixes.join(", ")));
@@ -2236,7 +2324,7 @@ impl Cycle<'_, '_> {
     /// again. Cases nothing in OSV tracks (prose, Node index, vendor incidents, CVE-list ranges) keep their
     /// status: whether they still match is unknown.
     fn reconcile(&mut self) {
-        let at = self.at.clone();
+        let (at, inventory) = (self.at.clone(), self.inventory);
         let keys: Vec<String> = self.cases.values().filter(|c| c.osv_ids.as_ref().is_some_and(|ids| !ids.is_empty())).map(|c| c.key.clone()).collect();
         for key in keys {
             let Some(c) = self.cases.get(&key) else { continue };
@@ -2251,7 +2339,7 @@ impl Cycle<'_, '_> {
                 if c.reopenable()
                     && let Some(c) = self.cases.get_mut(&key)
                 {
-                    match_again(c, &mut self.summary, &at);
+                    match_again(c, &mut self.summary, &at, inventory);
                 }
             } else if c.status() != CaseStatus::Closed
                 && let Some(c) = self.cases.get_mut(&key)
@@ -2512,18 +2600,37 @@ pub struct Prepared {
     pub report: PathBuf,
 }
 
-/// Cases handled in the last week that share a term or an alias with `c`.
-fn related_cases(cases: &IndexMap<String, Case>, c: &Case, now: Timestamp) -> Vec<Value> {
+/// How many related cases (the most recent) a case file carries: a long wave on one package does not fill the brief.
+const RELATED_CASES: usize = 8;
+
+/// The earlier cases that matter to this one. Handled in the last week and sharing a term or an alias: the same story
+/// told again. Judged before on the same package in the same place, any time ago: a new advisory is judged, but not
+/// from scratch, so its brief carries that verdict, the evidence (the report), and whether the version and exposure it
+/// was judged at are the ones the place shows now.
+fn related_cases(cases: &IndexMap<String, Case>, c: &Case, inventory: &Inventory, now: Timestamp) -> Vec<Value> {
     let week_ago = now.as_millisecond() - 7 * 86_400_000;
-    cases
+    let affected = c.affected.as_deref().unwrap_or_default();
+    let same_package = |other: &Case| {
+        other.triage.is_some()
+            && other.handled_at.is_some()
+            && other.affected.iter().flatten().any(|o| affected.iter().any(|a| a.host == o.host && a.r#where == o.r#where && a.name == o.name))
+    };
+    let mut related: Vec<(&Case, bool)> = cases
         .values()
-        .filter(|other| {
-            other.key != c.key
-                && other.handled_at.as_deref().and_then(parse_time).is_some_and(|handled| handled.as_millisecond() > week_ago)
-                && (other.terms.iter().flatten().any(|term| c.terms.iter().flatten().any(|t| t == term))
-                    || other.aliases.iter().any(|alias| c.aliases.contains(alias)))
+        .filter(|other| other.key != c.key)
+        .filter_map(|other| {
+            let story = other.handled_at.as_deref().and_then(parse_time).is_some_and(|handled| handled.as_millisecond() > week_ago)
+                && (other.terms.iter().flatten().any(|term| c.terms.iter().flatten().any(|t| t == term)) || other.aliases.iter().any(|alias| c.aliases.contains(alias)));
+            let package = same_package(other);
+            (story || package).then_some((other, package))
         })
-        .map(|other| {
+        .collect();
+    // The most recent first.
+    related.sort_by(|(a, _), (b, _)| b.handled_at.cmp(&a.handled_at));
+    related.truncate(RELATED_CASES);
+    related
+        .into_iter()
+        .map(|(other, package)| {
             let mut o = Map::new();
             o.insert("key".into(), json!(other.key));
             o.insert("title".into(), json!(other.title));
@@ -2533,6 +2640,31 @@ fn related_cases(cases: &IndexMap<String, Case>, c: &Case, now: Timestamp) -> Ve
             }
             if let Some(handled_at) = &other.handled_at {
                 o.insert("handledAt".into(), json!(handled_at));
+            }
+            if let Some(triage) = &other.triage {
+                o.insert("verdict".into(), serde_json::to_value(triage).unwrap_or(Value::Null));
+            }
+            if package {
+                o.insert("sameInstalledPackageAndPlace".into(), json!(true));
+                let judged: Vec<Value> = match &other.judged {
+                    Some(j) => j
+                        .overlap(c)
+                        .into_iter()
+                        .map(|i| {
+                            let still = inventory.items.iter().any(|x| x.host == i.host && x.r#where == i.r#where && x.name == i.name && x.version == i.version)
+                                && crate::judged::exposure_of(inventory, &i.host, &i.r#where) == i.exposure;
+                            json!({ "host": i.host, "where": i.r#where, "package": i.name, "version": i.version, "exposure": i.exposure, "unchangedSince": still })
+                        })
+                        .collect(),
+                    None => other
+                        .affected
+                        .iter()
+                        .flatten()
+                        .filter(|o| affected.iter().any(|a| a.host == o.host && a.r#where == o.r#where && a.name == o.name))
+                        .map(|i| json!({ "host": i.host, "where": i.r#where, "package": i.name, "version": i.version }))
+                        .collect(),
+                };
+                o.insert("judgedAt".into(), json!(judged));
             }
             Value::Object(o)
         })
@@ -2615,6 +2747,8 @@ pub fn prepare_case(config: &Config, c: &mut Case, inventory: &Inventory, cases:
             },
         });
     }
+    // What this response is about to see: it is what the case stands judged as once the response finishes.
+    c.judging = Judged::snapshot(c, inventory, &iso(now));
     let text = case_file(config, c, inventory, cases, mode, now);
     match (file.parent(), file.file_name().and_then(|n| n.to_str())) {
         (Some(parent), Some(name)) => write_state(parent, name, &text)?,
@@ -2655,7 +2789,7 @@ pub fn case_file(config: &Config, c: &Case, inventory: &Inventory, cases: &Index
     out.insert("priority".into(), json!(config.priority));
     out.insert("actOn".into(), json!(config.responder.as_ref().map(|r| r.act_on.clone()).unwrap_or_default()));
     out.insert("runbooks".into(), json!(runbooks_for(config, c)));
-    out.insert("related".into(), Value::Array(related_cases(cases, c, now)));
+    out.insert("related".into(), Value::Array(related_cases(cases, c, inventory, now)));
     if let Some(report) = &c.report {
         out.insert("report".into(), json!(report));
     }

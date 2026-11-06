@@ -159,8 +159,68 @@ pub fn build_brief(config: &Config, workdir: &Path) -> Result<String> {
     Ok(lines.join("\n"))
 }
 
+/// The triage as one line: `not-exploitable: why`.
+fn triage_line(t: &Triage) -> String {
+    let path = serde_json::to_value(t.path).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
+    format!("{path}: {}", t.why)
+}
+
+/// What the case already has on record, so a run builds on it and does not re-verify it from scratch: a pull request
+/// that already covers this advisory, an earlier report that established the facts. Empty when there is nothing.
+pub fn on_record(c: &Case) -> String {
+    let prs = c.pull_requests.as_deref().unwrap_or_default();
+    let earlier = c.previous_report.as_deref();
+    if prs.is_empty() && earlier.is_none() && c.judged.is_none() {
+        return String::new();
+    }
+    let mut out = String::from("\n## Already on record for this case\n\nBuild on it; don't re-verify from scratch what it already settled.\n");
+    if !prs.is_empty() {
+        out.push_str(&format!(
+            "- A fix pull request for exactly this advisory is already open: {}. Check only that it is still open, mergeable and passing, and that it covers every place in the case. If it does and `case.reason` names nothing new (exploitation in the wild, a shipped fix, a new affected version), the case is `already-handled`: a short report naming it, nothing else changed.\n",
+            prs.join(", ")
+        ));
+    }
+    if let Some(report) = earlier {
+        out.push_str(&format!("- The earlier report ({report}) established the affected versions, each place's exposure and the verdict. Take them as given while the installed version and exposure in `case.judged` are unchanged; spend this run on what `case.reason` says is new.\n"));
+    }
+    if let Some(triage) = &c.triage {
+        out.push_str(&format!("- Its verdict was `{}`.\n", triage_line(triage)));
+    }
+    out
+}
+
+/// What the run before a retry already did: how it ended, its verdict, the pull requests it opened and what its
+/// report said. The retry continues from there rather than redoing it. Empty when it left nothing.
+fn earlier_run(record: &ResponseRecord) -> String {
+    let report = record
+        .report
+        .as_deref()
+        .and_then(|path| fs::read_to_string(path).ok())
+        .filter(|text| !text.starts_with("(the agent wrote no report"))
+        .map(|text| message_of(&text))
+        .filter(|message| !message.trim().is_empty());
+    let prs = record.prs.as_deref().unwrap_or_default();
+    if record.error.is_none() && record.triage.is_none() && prs.is_empty() && report.is_none() {
+        return String::new();
+    }
+    let mut out = String::from("\n## What the earlier run did\n\nThis is a retry. The run before it did the following; continue from there. Do not redo what it finished or re-verify what it established; do only what it left, and mention anything you find contradicts it.\n");
+    if let Some(error) = &record.error {
+        out.push_str(&format!("- It ended with: {error}\n"));
+    }
+    if let Some(triage) = &record.triage {
+        out.push_str(&format!("- Its triage: `{}`\n", triage_line(triage)));
+    }
+    if !prs.is_empty() {
+        out.push_str(&format!("- Pull requests it opened: {}\n", prs.join(", ")));
+    }
+    if let Some(message) = report {
+        out.push_str(&format!("- What its report said (`## Message`):\n\n{}\n", slice_utf16(&message, 2000)));
+    }
+    out
+}
+
 /// Triage first: the standing brief, then this case.
-pub fn build_prompt(config: &Config, _c: &Case, case_file: &Path, mode: Mode, workdir: &Path, clones: &[String]) -> Result<String> {
+pub fn build_prompt(config: &Config, c: &Case, case_file: &Path, mode: Mode, workdir: &Path, clones: &[String]) -> Result<String> {
     let r = config.responder.as_ref().ok_or_else(|| anyhow!("no responder configured"))?;
     let brief = build_brief(config, workdir)?;
     let mode_text = match mode {
@@ -212,7 +272,7 @@ pub fn build_prompt(config: &Config, _c: &Case, case_file: &Path, mode: Mode, wo
         case_json.trim().to_string(),
         "```".to_string(),
     ];
-    Ok(format!("{brief}\n{}", rest.join("\n")))
+    Ok(format!("{brief}\n{}{}", rest.join("\n"), on_record(c)))
 }
 
 /// The responder's environment: `base` (the user's), minus every variable the watcher's config reads (tokens, keys)
@@ -561,9 +621,13 @@ pub fn start_response_with(config: &Config, c: &Case, case_file: &Path, mode: Mo
     let base = options.env.cloned().unwrap_or_else(process_env);
     let clones = clone_repos(config, &base, c, &workdir);
     let record_name = format!("responses/{}.json", slug(&c.key));
-    // A retry does not repeat what the run before it already told the user.
-    let earlier = if options.retry { read_state::<ResponseRecord>(&config.state_dir, &record_name).map(|r| r.urgent).unwrap_or_default() } else { Vec::new() };
+    // A retry does not repeat what the run before it already told the user, nor what it already did.
+    let previous = if options.retry { read_state::<ResponseRecord>(&config.state_dir, &record_name) } else { None };
+    let earlier = previous.as_ref().map(|r| r.urgent.clone()).unwrap_or_default();
     let mut prompt = build_prompt(config, c, case_file, mode, &workdir, &clones)?;
+    if let Some(previous) = &previous {
+        prompt.push_str(&earlier_run(previous));
+    }
     if !earlier.is_empty() {
         prompt.push_str("\n## Already sent\n\nAn earlier run of this case sent these urgent lines already, by the watcher or by your reach commands. Do not send them again; send a line only for something new:\n");
         for line in &earlier {

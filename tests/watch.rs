@@ -1459,10 +1459,8 @@ fn a_case_waits_on_a_down_service_and_returns_to_its_wait_when_it_is_back() {
     assert_eq!(h.responded().len(), 0, "a service back restores the wait; it does not re-dispatch");
 }
 
-/// A `waiting: service` case with nothing recorded underneath — it was open when its service went down, or
-/// a state file from before `service_prior` — reopens when the service is back: the responder picks it up.
-#[test]
-fn a_down_service_reopens_only_a_case_that_had_no_wait_to_return_to() {
+/// A harness whose `service-state` file says the `api` project runs (the directory holding the file goes with the second value).
+fn api_service_harness() -> (Harness, common::TempDir) {
     let dir = common::TempDir::new("cvecondor-test");
     let file = dir.path().join("service-state.json");
     std::fs::write(&file, json!({ "generatedAt": "2026-10-21T08:12:00Z", "containers": api_running() }).to_string()).expect("writes the state file");
@@ -1474,19 +1472,44 @@ fn a_down_service_reopens_only_a_case_that_had_no_wait_to_return_to() {
         config, net: shared(Net::new("2026-10-20T00:00:00Z")), rec: recorder(), responded: Arc::default(), runs: Arc::default(),
         clock: AtomicI64::new(parse_time("2026-10-21T08:12:00Z").expect("a time").as_millisecond()),
     };
-    // The case shows `waiting: service` with no prior wait recorded — it was open when its service went
-    // down, or a state file from before `servicePrior` — and the file now says it runs. A cycle sees a
-    // `waiting: service` case whose service is back and nothing to return to: it reopens, dispatched now.
+    (h, dir)
+}
+
+/// A service that stopped and started with nothing else changed is not judged again: a `waiting: service` case with
+/// no wait remembered under it (a state file from before `service_prior`) settles back to what its response says it
+/// waits on — nothing for the responder, no line to the user.
+#[test]
+fn a_service_that_stopped_and_started_settles_the_case_back_when_no_wait_was_remembered() {
+    let (h, _dir) = api_service_harness();
     h.put_case(api_case(json!({
         "state": "handled", "handledBy": "responder", "handledAt": "2026-10-20T10:00:00Z",
+        "triage": { "path": "not-exploitable", "why": "the vulnerable function is never called" },
+        "status": "waiting", "statusReason": "service", "service": "down",
+        "targets": ["github repo:acme/api left-pad 1.0.0 (package-lock.json)"]
+    })));
+    let summary = h.cycle();
+    let c = &h.cases()["CVE-2026-9"];
+    assert_eq!((c.status(), c.status_reason()), (CaseStatus::Waiting, Some(StatusReason::Upstream)), "{c:?}");
+    assert_eq!(c.state, CaseState::Handled, "{c:?}");
+    assert!(c.reopened_at.is_none() && summary.reopened.is_empty(), "nothing reopened: {summary:?}");
+    assert_eq!(h.responded().len(), 0, "a service flap spawns no run");
+}
+
+/// A service the responder itself stopped (the `shutdown` path) is the one that comes back as news: the vulnerable
+/// thing runs again, so the responder picks the case up.
+#[test]
+fn a_service_the_responder_stopped_reopens_the_case_when_it_is_back() {
+    let (h, _dir) = api_service_harness();
+    h.put_case(api_case(json!({
+        "state": "handled", "handledBy": "responder", "handledAt": "2026-10-20T10:00:00Z",
+        "triage": { "path": "shutdown", "why": "no narrower mitigation" },
         "status": "waiting", "statusReason": "service", "service": "down",
         "targets": ["github repo:acme/api left-pad 1.0.0 (package-lock.json)"]
     })));
     h.cycle();
     let c = &h.cases()["CVE-2026-9"];
     assert_eq!(c.status(), CaseStatus::Open, "{c:?}");
-    assert_eq!(c.service, Some(cvecondor::service::ServiceState::Running), "{c:?}");
-    assert_eq!(h.responded().len(), 1, "with no settled wait it re-dispatches the case");
+    assert_eq!(h.responded().len(), 1, "{c:?}");
     assert!(matches(r"service is back", &c.reason), "{c:?}");
 }
 
@@ -1624,4 +1647,152 @@ fn an_explicit_running_true_beats_the_state_file() {
     plain.as_object_mut().expect("an object").extend(json!({ "services": [ { "repo": "acme/api", "project": "api" } ] }).as_object().expect("an object").clone());
     let states = cvecondor::service::service_states(&test_config(plain), &inventory, parse_time("2026-10-21T08:06:00Z").expect("a time"));
     assert_eq!(states["acme/api"].state, Some(cvecondor::service::ServiceState::Down), "{states:?}");
+}
+
+/// A case a response judged: left-pad 1.0.0 in `acme/api`, not exploitable, as the state file holds one.
+fn judged_case(extra: Value) -> Case {
+    let mut raw = json!({
+        "state": "handled", "handledBy": "responder", "handledAt": "2026-10-20T10:00:00Z", "report": "/data/reports/earlier.md",
+        "triage": { "path": "not-exploitable", "why": "the vulnerable function is never called" },
+        "aliases": ["GHSA-gone"], "sources": ["osv:npm"], "osvIds": { "GHSA-gone": "2026-01-01T00:00:00Z" },
+        "targets": ["github repo:acme/api left-pad 1.0.0 (package-lock.json)"],
+        "affected": [{ "host": "github", "where": "repo:acme/api", "name": "left-pad", "version": "1.0.0" }],
+        "judged": { "at": "2026-10-20T10:00:00Z", "items": [{ "host": "github", "where": "repo:acme/api", "name": "left-pad", "version": "1.0.0" }] }
+    });
+    raw.as_object_mut().expect("an object").extend(extra.as_object().cloned().unwrap_or_default());
+    case("CVE-2026-9000", &[("github", "repo:acme/api")], raw)
+}
+
+/// The advisory `judged_case` was opened for matches the fixture's left-pad again.
+fn gone_advisory_returns(n: &mut Net) {
+    n.osv_head = "2026-10-22T00:00:00Z".into();
+    n.osv.insert("left-pad".into(), vec![stub("GHSA-gone", "2026-10-22T00:00:00Z")]);
+    n.records.insert(
+        "GHSA-gone".into(),
+        json!({ "id": "GHSA-gone", "modified": "2026-10-22T00:00:00Z", "aliases": ["CVE-2026-9000"], "summary": "left-pad RCE", "database_specific": high(), "affected": [] }),
+    );
+}
+
+/// Each vulnerability is judged once per place: the same advisory coming back at the version and exposure it was
+/// judged at (the inventory stopped matching it, then matched again) spawns nothing.
+#[test]
+fn an_advisory_already_judged_at_this_version_and_exposure_spawns_nothing_when_it_comes_back() {
+    let h = Harness::new(Net::new("2026-10-20T00:00:00Z"), claude());
+    h.put_case(judged_case(json!({})));
+    h.cycle(); // GHSA-gone is not among the hits: closed as fixed
+    let c = &h.cases()["CVE-2026-9000"];
+    assert_eq!((c.status(), c.status_reason()), (CaseStatus::Closed, Some(StatusReason::Fixed)), "{c:?}");
+    h.net(gone_advisory_returns);
+    let summary = h.cycle();
+    let c = &h.cases()["CVE-2026-9000"];
+    assert_eq!((c.status(), c.status_reason()), (CaseStatus::Waiting, Some(StatusReason::Upstream)), "settled back on its earlier verdict: {c:?}");
+    assert!(summary.reopened.is_empty() && c.reopened_at.is_none(), "{summary:?}");
+    assert_eq!(h.responded().len(), 0, "an advisory judged already, at the same version and exposure, is not judged again");
+    assert!(h.told(NotifyEvent::Urgent).is_empty());
+}
+
+/// What is material re-judges: the installed version it was judged at gone, exploitation in the wild, a fix.
+#[test]
+fn a_returning_advisory_is_judged_again_when_the_version_exploitation_or_a_fix_changed() {
+    let judged_at_another_version = json!({ "judged": { "at": "2026-10-20T10:00:00Z", "items": [{ "host": "github", "where": "repo:acme/api", "name": "left-pad", "version": "0.9.0" }] } });
+    for (what, extra) in [("the installed version changed", judged_at_another_version), ("exploited in the wild", json!({ "exploited": true })), ("a fix shipped", json!({ "fixAvailable": true }))] {
+        let h = Harness::new(Net::new("2026-10-20T00:00:00Z"), claude());
+        h.put_case(judged_case(extra));
+        h.cycle();
+        h.net(gone_advisory_returns);
+        let summary = h.cycle();
+        assert_eq!(summary.reopened, ["CVE-2026-9000"], "{what}");
+        assert_eq!(h.responded().len(), 1, "{what}: judged again");
+    }
+}
+
+/// CISA listing a judged case as exploited changes what to do, whatever the judgement says.
+#[test]
+fn exploitation_in_the_wild_judges_an_already_judged_case_again() {
+    let mut net = Net::new("2026-10-20T00:00:00Z");
+    net.feeds.insert("cisa-kev".into(), json!({ "vulnerabilities": [] }).to_string());
+    let h = Harness::new(net, claude());
+    h.cycle(); // baseline
+    h.put_case(judged_case(json!({ "osvIds": null })));
+    h.net(|n| {
+        n.feeds.insert(
+            "cisa-kev".into(),
+            json!({
+                "vulnerabilities": [{ "cveID": "CVE-2026-9000", "vendorProject": "acme", "product": "left-pad", "vulnerabilityName": "RCE", "dateAdded": "2026-10-21", "shortDescription": "Seen exploited.", "requiredAction": "Patch." }]
+            })
+            .to_string(),
+        );
+    });
+    h.cycle();
+    let c = &h.cases()["CVE-2026-9000"];
+    assert_eq!(c.exploited, Some(true), "{c:?}");
+    assert_eq!(h.responded().len(), 1, "judged again: {c:?}");
+    assert!(matches(r"^now exploited in the wild", &c.reason), "{}", c.reason);
+}
+
+/// A new advisory is always judged, also on a package an earlier one was judged on: its brief carries that verdict
+/// and says whether the version and exposure it was judged at still hold.
+#[test]
+fn a_new_advisory_on_an_already_judged_package_is_judged_with_the_earlier_verdict_in_its_brief() {
+    let h = Harness::new(Net::new("2026-10-20T00:00:00Z"), claude());
+    h.cycle(); // baseline
+    h.put_case(judged_case(json!({ "osvIds": null })));
+    h.net(|n| {
+        n.osv_head = "2026-10-21T09:00:00Z".into();
+        n.osv.insert("left-pad".into(), vec![stub("GHSA-new", "2026-10-21T09:00:00Z")]);
+        n.records.insert(
+            "GHSA-new".into(),
+            json!({ "id": "GHSA-new", "modified": "2026-10-21T09:00:00Z", "aliases": ["CVE-2026-9001"], "summary": "left-pad ReDoS", "database_specific": high(), "affected": [] }),
+        );
+    });
+    h.cycle();
+    let responded = h.responded();
+    assert_eq!(responded.len(), 1, "the new advisory is judged");
+    assert_eq!(responded[0].0.key, "CVE-2026-9001");
+    let file: Value = read_state(
+        cvecondor::watch::case_path(&h.config.state_dir, "CVE-2026-9001").parent().expect("a dir"),
+        &format!("{}.json", slug("CVE-2026-9001")),
+    )
+    .expect("the case file");
+    let earlier = file["related"].as_array().expect("related").iter().find(|r| r["key"] == "CVE-2026-9000").expect("the earlier case is related");
+    assert_eq!(earlier["verdict"]["path"], "not-exploitable");
+    assert_eq!(earlier["verdict"]["why"], "the vulnerable function is never called");
+    assert_eq!(earlier["report"], "/data/reports/earlier.md", "the evidence");
+    assert_eq!(earlier["judgedAt"], json!([{ "host": "github", "where": "repo:acme/api", "package": "left-pad", "version": "1.0.0", "exposure": "", "unchangedSince": true }]));
+}
+
+/// Advisories pending on one place at once are judged by one response, across cycles too: a backlog the responder
+/// has not started on takes the next advisory in rather than growing by one run per advisory.
+#[test]
+fn advisories_pending_on_one_place_are_judged_in_one_run_also_when_they_arrive_in_different_cycles() {
+    let mut h = Harness::new(Net::new("2026-10-20T00:00:00Z"), claude());
+    h.config.config.responder.as_mut().expect("a responder").max_per_cycle = 0.0; // nothing starts yet
+    h.cycle(); // baseline
+    let advisory = |id: &'static str, cve: &'static str, package: &'static str, head: &'static str| {
+        move |n: &mut Net| {
+            n.osv_head = head.into();
+            n.osv.insert(package.into(), vec![stub(id, head)]);
+            n.records.insert(
+                id.into(),
+                json!({ "id": id, "modified": head, "aliases": [cve], "summary": format!("{package} flaw"), "database_specific": high(), "affected": [] }),
+            );
+        }
+    };
+    h.net(advisory("GHSA-aaaa", "CVE-2026-1111", "left-pad", "2026-10-21T09:00:00Z"));
+    h.cycle();
+    h.net(advisory("GHSA-bbbb", "CVE-2026-2222", "right-pad", "2026-10-21T10:00:00Z"));
+    h.cycle();
+    assert!(h.responded().is_empty());
+    let pending: Vec<Case> = h.cases().into_values().filter(|c| c.state == CaseState::Pending).collect();
+    assert_eq!(pending.len(), 1, "the second advisory joined the first: {pending:?}");
+    assert_eq!(pending[0].advisories.as_ref().map(Vec::len), Some(2));
+    assert!(matches(r"^2 vulnerabilities in github repo:acme/api: ", &pending[0].title), "{}", pending[0].title);
+    assert!(pending[0].aliases.contains(&"CVE-2026-1111".to_string()) && pending[0].aliases.contains(&"CVE-2026-2222".to_string()), "{:?}", pending[0].aliases);
+
+    h.config.config.responder.as_mut().expect("a responder").max_per_cycle = 2.0;
+    h.net(advisory("GHSA-cccc", "CVE-2026-3333", "left-pad", "2026-10-21T11:00:00Z"));
+    h.cycle();
+    let responded = h.responded();
+    assert_eq!(responded.len(), 1, "one run for every advisory pending on the place");
+    assert!(matches(r"^3 vulnerabilities in github repo:acme/api", &responded[0].0.title), "{}", responded[0].0.title);
 }
