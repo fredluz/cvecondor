@@ -1432,12 +1432,12 @@ fn the_services_list_marks_what_the_state_file_cannot_see() {
     extra
         .as_object_mut()
         .expect("an object")
-        .extend(json!({ "services": [ { "repo": "acme/blog", "deployed": false, "note": "moved off the VPS" }, { "repo": "acme/api", "running": false } ] }).as_object().expect("an object").clone());
+        .extend(json!({ "services": [ { "repo": "acme/blog", "deployed": false, "note": "moved off the server" }, { "repo": "acme/api", "running": false } ] }).as_object().expect("an object").clone());
     let config = test_config(extra);
     let inventory = inventory();
     let states = cvecondor::service::service_states(&config, &inventory, parse_time("2026-10-21T08:06:00Z").expect("a time"));
     assert_eq!(states["acme/blog"].state, Some(cvecondor::service::ServiceState::Undeployed), "{states:?}");
-    assert_eq!(states["acme/blog"].detail, "undeployed: moved off the VPS");
+    assert_eq!(states["acme/blog"].detail, "undeployed: moved off the server");
     assert_eq!(states["acme/api"].state, Some(cvecondor::service::ServiceState::Down), "{states:?}");
     assert_eq!(states["acme/worker"].state, None, "no mapping, no containers: unknown, treated as running");
 }
@@ -1460,4 +1460,30 @@ fn a_project_mapping_reads_the_projects_containers() {
     assert!(states["acme/api"].containers.iter().any(|l| l.contains("api-1")), "{:?}", states["acme/api"].containers);
     // A repo without a mapping whose project name matches anyway resolves the same.
     assert_eq!(states["acme/blog"].state, Some(cvecondor::service::ServiceState::Running), "{states:?}");
+}
+
+/// `running: true` beats the file: the service runs somewhere the file can't see, so a file that
+/// shows every container of the mapped project stopped does not make it down.
+#[test]
+fn an_explicit_running_true_beats_the_state_file() {
+    let dir = common::TempDir::new("cvecondor-test");
+    let file = dir.path().join("service-state.json");
+    std::fs::write(&file, json!({ "generatedAt": "2026-10-21T08:00:00Z", "containers": api_stopped() }).to_string()).expect("writes the state file");
+    let mut extra = state_config(&file);
+    extra
+        .as_object_mut()
+        .expect("an object")
+        .extend(json!({ "services": [
+            { "repo": "acme/api", "project": "api", "running": true, "note": "prod runs elsewhere; this box is a retired deploy" }
+        ] }).as_object().expect("an object").clone());
+    let config = test_config(extra);
+    let inventory = inventory();
+    let states = cvecondor::service::service_states(&config, &inventory, parse_time("2026-10-21T08:06:00Z").expect("a time"));
+    assert_eq!(states["acme/api"].state, Some(cvecondor::service::ServiceState::Running), "{states:?}");
+    assert_eq!(states["acme/api"].detail, "prod runs elsewhere; this box is a retired deploy");
+    // Without the flag, the same file marks the same project down.
+    let mut plain = state_config(&file);
+    plain.as_object_mut().expect("an object").extend(json!({ "services": [ { "repo": "acme/api", "project": "api" } ] }).as_object().expect("an object").clone());
+    let states = cvecondor::service::service_states(&test_config(plain), &inventory, parse_time("2026-10-21T08:06:00Z").expect("a time"));
+    assert_eq!(states["acme/api"].state, Some(cvecondor::service::ServiceState::Down), "{states:?}");
 }

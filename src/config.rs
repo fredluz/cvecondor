@@ -191,6 +191,8 @@ pub struct ServiceConfig {
     /// `false`: never deployed — the case waits on the service, no exploitability claim.
     pub deployed: Option<bool>,
     /// A running flag for services the state file can't see (another host, a platform).
+    /// `true` wins over the file — 'down' only stands when every known place is down and
+    /// nothing says it runs elsewhere.
     pub running: Option<bool>,
     /// Shown with the state in `status` and the case file.
     pub note: Option<String>,

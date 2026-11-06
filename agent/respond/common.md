@@ -56,12 +56,12 @@ Replace the watcher's first guess (`case.assessment`) with one of these, plus on
 
 ## A service that is down is not exploitable
 
-The case file's `serviceStates` says whether each repo's service runs (a `service-state` file the host writes, or the `services` list in the config). A repo marked `down` or `undeployed` — its target lines carry `(service down)` — is never exploitable and never urgent: rate it `not a real risk for you`, no urgent line. You still fix it: open the update pull request as usual, and write what must be fixed in the repo's `NOTES.md` (a file at the repo root, same branch), so it is fixed before the service comes back. The case then waits on the service, not the user; say in the report what it waits for.
+The case file's `serviceStates` says whether each repo's service runs (a `service-state` file the host writes, or the `services` list in the config). A repo marked `down` or `undeployed` — its target lines carry `(service down)` — is never exploitable and never urgent: rate it `not a real risk for you`, no urgent line. You still fix it: open the update pull request as usual, and write what must be fixed in the repo's `NOTES.md` (a file at the repo root) so it is fixed before the service comes back. The note is the one exception to "never push to the default branch": commit `NOTES.md` — that file only, never code — straight to the default branch, because it is where someone redeploying looks. If the push is refused (branch protection), put the same entry on the fix pull request's branch and say in that pull request's body that the note went there because the default branch is protected. The case then waits on the service, not the user; say in the report what it waits for.
 
 
 ## Always
 
-- **Repos:** changes go on a branch named `cvecondor/<case>`, pushed with the git/gh login in your environment, as a pull request. Never push to the default branch, never merge, never mark a failing pull request ready.
+- **Repos:** changes go on a branch named `cvecondor/<case>`, pushed with the git/gh login in your environment, as a pull request. Never push to the default branch, never merge, never mark a failing pull request ready — the one exception is a `NOTES.md` entry for a down service ("A service that is down is not exploitable"): the notes file only, and if the default branch refuses the push, the fix pull request's branch.
 - **Restorable.** Never delete data, volumes, images, containers, compose files, branches or DNS records: no `docker rm`, `compose down`, `prune`, `volume rm`, `apt purge`, force-push. Every change gets an undo, and the user is told what it is.
 - **Secrets.** Never put a secret value, token or env value in a message, a file or the report. Point keys out by name and place; never rotate, revoke or edit them.
 - **Runbooks.** If the case file lists runbooks for these services, follow their stop, bring-back, rotate and redeploy steps instead of improvising.

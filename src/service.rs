@@ -279,8 +279,9 @@ fn inventory_containers<'a>(inventory: &'a Inventory, project: &str) -> Vec<&'a 
 /// project defaults to the repo's own name (`services[].project` overrides).
 ///
 /// Resolution, in order:
-/// 1. Explicit flags: `deployed: false` or `running: false` mark it down (the file can only
-///    override an explicit "it runs", never an explicit "it is down").
+/// 1. Explicit flags: `deployed: false` or `running: false` mark it down; `running: true` marks it
+///    running — the service may run somewhere the file can't see, so an explicit "it runs" beats
+///    the file, and 'down' only stands when every known place is down and nothing says otherwise.
 /// 2. A fresh state file that lists the project: running when any of its containers runs;
 ///    then containers another collector recorded for the project, the same way.
 /// 3. `undeployed` only when the repo is explicitly mapped (`project` or a flag) and some
@@ -300,8 +301,17 @@ pub fn service_state_for(config: &Config, inventory: &Inventory, repo: &str, now
                 containers: Vec::new(),
             };
         }
-        if e.running == Some(true) || e.deployed == Some(true) {
-            // An explicit "it runs" is overridden only by a fresh file that shows it does not.
+        if e.running == Some(true) {
+            // An explicit "it runs" beats the file: the service may run somewhere the file can't
+            // see, and 'down' only stands when every known place is down and nothing says otherwise.
+            return Resolution {
+                state: Some(ServiceState::Running),
+                detail: if note.is_empty() { "running (set in the config)".to_string() } else { note },
+                containers: Vec::new(),
+            };
+        }
+        if e.deployed == Some(true) {
+            // Deployed is explicit but running is not: a fresh file that shows it stopped still wins.
             if let Some(containers) = project.as_deref().and_then(|p| project_containers(config, p, now))
                 && !containers.iter().any(|c| c.state.as_deref().is_some_and(is_running))
             {

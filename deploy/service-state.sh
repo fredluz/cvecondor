@@ -6,7 +6,7 @@
 # Run it on the host every few minutes (cron or a systemd timer), as a user
 # allowed to `docker inspect`, writing where the watcher mounts it read-only:
 #
-#   */2 * * * * root /opt/cvewatch/service-state.sh /var/lib/cvewatch/services.json
+#   */2 * * * * root /opt/cvecondor/service-state.sh /var/lib/cvecondor/services.json
 #
 # Needs docker and jq. Exit 0 with no containers is a valid, empty file.
 set -eu
