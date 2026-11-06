@@ -54,6 +54,11 @@ Replace the watcher's first guess (`case.assessment`) with one of these, plus on
 - **plan it:** affected, no fix yet, and not exploitable here.
 - **not a real risk for you:** not affected, or the trigger can't occur here.
 
+## A service that is down is not exploitable
+
+The case file's `serviceStates` says whether each repo's service runs (a `service-state` file the host writes, or the `services` list in the config). A repo marked `down` or `undeployed` — its target lines carry `(service down)` — is never exploitable and never urgent: rate it `not a real risk for you`, no urgent line. You still fix it: open the update pull request as usual, and write what must be fixed in the repo's `NOTES.md` (a file at the repo root, same branch), so it is fixed before the service comes back. The case then waits on the service, not the user; say in the report what it waits for.
+
+
 ## Always
 
 - **Repos:** changes go on a branch named `cvecondor/<case>`, pushed with the git/gh login in your environment, as a pull request. Never push to the default branch, never merge, never mark a failing pull request ready.

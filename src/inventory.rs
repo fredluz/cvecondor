@@ -53,6 +53,7 @@ pub fn run_collector(collector: &CollectorConfig, context: &CollectContext) -> R
         CollectorConfig::Host(c) => host::collect_host(c, context),
         CollectorConfig::Docker(c) => docker::collect_docker(c, context),
         CollectorConfig::Ssh(c) => ssh::collect_ssh(c, context),
+        CollectorConfig::ServiceState(c) => crate::service::collect_state(c, context),
     }
 }
 

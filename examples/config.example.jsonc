@@ -29,7 +29,21 @@
     // A server elsewhere, over SSH with a key used only for this: host packages, containers (docker inspect/cp,
     // never exec), compose and .env files. "sudo": true uses `sudo -n` for the reads that need it.
     // { "type": "ssh", "name": "web1", "host": "watcher@203.0.113.7", "identityFile": "~/.ssh/cvecondor_ro", "sudo": true }
+    // A service-state file a job on the host writes every few minutes (deploy/service-state.sh):
+    // container names, states, ports and labels, never env values. It is how the watcher knows a
+    // service is down when the watcher has no Docker socket. Stale or missing: unknown, treated as running.
+    // { "type": "service-state", "file": "/host-state/services.json", "maxAge": 1800 }
   ],
+
+  // Optional. What the state file can't see, per repo: "project" binds a repo to a compose project
+  // whose name differs; "deployed"/"running" mark a service on another platform by hand.
+  // A down or undeployed service is never called exploitable: its fix PR still opens, its repo's
+  // NOTES.md logs it, and the case waits on the service, not on you.
+  // "services": [
+  //   { "repo": "your-org/api", "project": "api-prod" },
+  //   { "repo": "your-org/site", "deployed": false, "note": "moved to Netlify" },
+  //   { "repo": "your-org/worker", "running": false, "note": "paused for the winter" }
+  // ],
 
   // Repos, containers or hostnames (globs) that serve your customers: they lead every case and message.
   "priority": ["your-org/api", "app.example.com"],

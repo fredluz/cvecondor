@@ -9,6 +9,9 @@ Follow `common.md` throughout. No investigation: apply the update.
 - **Moving to a supported line** (the case says its line gets no fix): the update is the release line it names, a major-version jump with nothing to pin on the old line. In a repo, the branch moves the runtime version files and the base image to that line and is tested like any update, the jump named in the pull request. On a server, rebuild on that line only once the code it runs passes its tests there (the repo's pull request); until then, propose it (`propose.md`) and say what the move takes.
 - **Check the service still works:** the running version, its health (HTTP status of its hostname, logs, its tests). The report says what was updated, that it works, and how to roll back. An update sends no message.
 
+**The service is down.** Repo places marked `(service down)` aren't running (`common.md`): nothing on a server gets pulled, rebuilt or restarted — the update is the pull request plus the `NOTES.md` entry that says what to fix before the service comes back. Never start a stopped service to check the fix.
+
+
 Whatever in this case has no fixed release yet goes back through triage's question 4 (exploitable here?) and on to `not-exploitable.md`, `workaround.md` or `propose.md`.
 
 ## When the fix the case waited for ships (REOPENED)

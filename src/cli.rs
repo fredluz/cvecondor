@@ -43,6 +43,7 @@ use crate::vendors::detect_vendors;
 use crate::watch::{
     Affected, AssessInput, Assessment, Case, CaseState, CaseStatus, CycleDeps, CycleSummary, HandledBy, Known, Rating, ResponseRecord, ResponseState, Run,
     StatusReason, assess, case_file, case_mode, merge_responses, prepare_case, read_cases, read_responses, report_finished_batches, report_path, run_cycle,
+    service_phase,
 };
 
 fn help() -> String {
@@ -294,6 +295,10 @@ fn merge_now(config: &Config) -> Result<Option<usize>> {
     with_lock(&config.state_dir, "cycle", || -> Result<usize> {
         let mut cases: IndexMap<String, Case> = read_cases(&config.state_dir);
         let count = merge_responses(&config.state_dir, &mut cases, &iso(util::now()));
+        if let Some(inventory) = read_state::<crate::types::Inventory>(&config.state_dir, "inventory.json") {
+            let mut summary = CycleSummary::default();
+            service_phase(config, &inventory, &mut cases, &mut summary, &iso(util::now()), util::now());
+        }
         write_state(&config.state_dir, "cases.json", &cases)?;
         queue_failures(config, &cases)?;
         Ok(count)
@@ -560,6 +565,17 @@ fn status(config: &Config, show_closed: bool) -> Result<String> {
         lines.push(format!("  errors: {}", l.errors.iter().take(6).cloned().collect::<Vec<_>>().join("; ")));
     }
     lines.push(inventory.as_ref().map_or_else(|| "Inventory: not collected yet".to_string(), inventory_text));
+    // Services seen as down or undeployed (the state file, or the `services` config list).
+    if let Some(inventory) = &inventory {
+        let down: Vec<String> = crate::service::service_states(config, inventory, util::now())
+            .iter()
+            .filter(|(_, r)| r.state.is_some_and(|s| s.is_down()))
+            .map(|(repo, r)| format!("{repo} ({})", if r.detail.is_empty() { r.state.map(|s| s.as_str()).unwrap_or("down").to_string() } else { r.detail.clone() }))
+            .collect();
+        if !down.is_empty() {
+            lines.push(format!("Services down: {}", down.join("; ")));
+        }
+    }
     lines.push(format!(
         "Sources: {} known, {} failing{}",
         feeds.len(),

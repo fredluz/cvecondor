@@ -8,6 +8,8 @@ Follow `common.md` throughout. Establish the facts below through subagents, in p
 2. **Affected here?** The version actually in use is in range: the lockfile on the default branch, the image tag and its runtime version, `dpkg-query -W <pkg>` or `<binary> --version` on a server you can reach. When the vendor says "all versions", count it as affected.
 3. **Is a fix released, in the artifact the user runs?** A fixed release that exists today. If the artifact that carries it doesn't exist yet (an official image not rebuilt on the fixed runtime, an image that bundles the server and has no release with the fixed version; check the tag's runtime version), there is no fix yet.
 4. **Exploitable here?** Only when no fix is released (with a fix, don't spend time proving exploitability: update). Are the trigger conditions present: the vulnerable feature enabled, the configuration that exposes it, the function actually called, an input an attacker can reach (a public endpoint, an upload, a parser fed by users)? Is it reachable from outside (public hostname, published port, reverse-proxy route, firewall)? Check it now; there is no stored exposure map. A trigger condition that is absent, or that you cannot establish, means not exploitable.
+
+A service marked down or undeployed (`serviceStates` in the case file, `(service down)` on its targets) cannot be exploited at all: `common.md`, "A service that is down is not exploitable". Do not reach for the server to prove it.
 5. **How serious for this user**: the rating (`common.md`).
 6. **In `actOn` or not**: the mode under "This case".
 

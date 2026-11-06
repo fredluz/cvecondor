@@ -157,6 +157,45 @@ pub struct DockerCollector {
     pub exec: bool,
 }
 
+/// A `service-state` file a job on the host writes every few minutes (container names,
+/// states, published ports, compose project and labels — never env values), mounted
+/// read-only where the watcher runs. Lets the watcher know which services are down
+/// without giving the container Docker access. A stale or missing file is "unknown".
+#[derive(Debug, Clone)]
+pub struct ServiceStateCollector {
+    pub name: String,
+    /// The mounted file, e.g. `/host-state/services.json`.
+    pub file: PathBuf,
+    /// A file older than this counts as stale (unknown). Default `DEFAULT_STATE_MAX_AGE`.
+    pub max_age_seconds: f64,
+}
+
+impl ServiceStateCollector {
+    /// `max_age` as a `Duration`.
+    pub fn max_age(&self) -> std::time::Duration {
+        std::time::Duration::from_secs_f64(self.max_age_seconds.max(1.0))
+    }
+}
+
+/// Stale after 30 minutes without a written file (a job every few minutes is expected).
+pub const DEFAULT_STATE_MAX_AGE: f64 = 1800.0;
+
+/// What the `services` config list says about one repo's deployment. Everything optional:
+/// `project` only binds the repo to a compose project whose name differs from the repo's.
+#[derive(Debug, Clone)]
+pub struct ServiceConfig {
+    /// `owner/name`.
+    pub repo: String,
+    /// The compose project its containers belong to; default: the repo's own name.
+    pub project: Option<String>,
+    /// `false`: never deployed — the case waits on the service, no exploitability claim.
+    pub deployed: Option<bool>,
+    /// A running flag for services the state file can't see (another host, a platform).
+    pub running: Option<bool>,
+    /// Shown with the state in `status` and the case file.
+    pub note: Option<String>,
+}
+
 /// A remote Linux host over SSH: the host collector's reads, plus its containers through the docker CLI (inspect and cp, never exec).
 #[derive(Debug, Clone)]
 pub struct SshCollector {
@@ -179,6 +218,7 @@ pub enum CollectorConfig {
     Host(HostCollector),
     Docker(DockerCollector),
     Ssh(SshCollector),
+    ServiceState(ServiceStateCollector),
 }
 
 impl CollectorConfig {
@@ -188,16 +228,18 @@ impl CollectorConfig {
             Self::Host(c) => &c.name,
             Self::Docker(c) => &c.name,
             Self::Ssh(c) => &c.name,
+            Self::ServiceState(c) => &c.name,
         }
     }
 
-    /// The `type` string of the config file: `github`, `host`, `docker`, `ssh`.
+    /// The `type` string of the config file: `github`, `host`, `docker`, `ssh`, `service-state`.
     pub fn type_name(&self) -> &'static str {
         match self {
             Self::Github(_) => "github",
             Self::Host(_) => "host",
             Self::Docker(_) => "docker",
             Self::Ssh(_) => "ssh",
+            Self::ServiceState(_) => "service-state",
         }
     }
 }
@@ -358,6 +400,9 @@ pub struct Config {
     /// General security news (Hacker News front page, BleepingComputer, The Hacker News, SecurityWeek, Krebs), matched against your vendors.
     pub news: bool,
     pub collectors: Vec<CollectorConfig>,
+    /// Per-repo deployment state overrides: `project` binds a repo to its compose project,
+    /// `deployed`/`running` mark what the state file can't see. See `ServiceConfig`.
+    pub services: Vec<ServiceConfig>,
     /// Vendors added by hand; detected ones come from the inventory at runtime.
     pub vendors: Vec<VendorConfig>,
     /// Catalogue vendor ids never to watch even when detected.
@@ -817,7 +862,7 @@ pub fn build_config(raw: &Value, file: &Path, env: &Env) -> Result<Config> {
         for (i, value) in list.iter().enumerate() {
             let at = format!("collectors[{i}]");
             let c = obj(value, &at)?;
-            let kind = one_of(c, "type", &at, &["github", "host", "docker", "ssh"], None)?;
+            let kind = one_of(c, "type", &at, &["github", "host", "docker", "ssh", "service-state"], None)?;
             let default_name = match (kind, c.get("host").and_then(Value::as_str)) {
                 ("ssh", Some(host)) => host.rsplit_once('@').map_or(host, |(_, h)| h).to_string(),
                 _ => kind.to_string(),
@@ -857,6 +902,11 @@ pub fn build_config(raw: &Value, file: &Path, env: &Env) -> Result<Config> {
                     };
                     CollectorConfig::Docker(DockerCollector { name, endpoint, tls, exec })
                 }
+                "service-state" => CollectorConfig::ServiceState(ServiceStateCollector {
+                    file: path(&str_of(c, "file", &at, None)?),
+                    max_age_seconds: num_of(c, "maxAge", &at, DEFAULT_STATE_MAX_AGE)?,
+                    name,
+                }),
                 _ => CollectorConfig::Ssh(SshCollector {
                     host: str_of(c, "host", &at, None)?,
                     port: if c.contains_key("port") { Some(port_of(num_of(c, "port", &at, 22.0)?, &at)?) } else { None },
@@ -1064,6 +1114,24 @@ pub fn build_config(raw: &Value, file: &Path, env: &Env) -> Result<Config> {
     let rotation_map = opt_str(root, "rotationMap", "config")?.map(|p| path(&p));
     let runbooks = opt_str(root, "runbooks", "config")?.map(|p| path(&p));
 
+    // Which repos' services are deployed and running where the state file can't see (another
+    // platform, a different compose project name). `deployed: false` marks a repo never deployed.
+    let mut services = Vec::new();
+    if let Some(Value::Array(list)) = root.get("services") {
+        for (i, value) in list.iter().enumerate() {
+            let at = format!("services[{i}]");
+            let s = obj(value, &at)?;
+            services.push(ServiceConfig {
+                repo: str_of(s, "repo", &at, None)?,
+                project: opt_str(s, "project", &at)?,
+                deployed: if s.contains_key("deployed") { Some(bool_of(s, "deployed", &at, false)?) } else { None },
+                running: if s.contains_key("running") { Some(bool_of(s, "running", &at, false)?) } else { None },
+                note: opt_str(s, "note", &at)?,
+            });
+        }
+    }
+
+
     let mut secrets = interpolator.secrets;
     sort_longest_first(&mut secrets);
     Ok(Config {
@@ -1076,6 +1144,7 @@ pub fn build_config(raw: &Value, file: &Path, env: &Env) -> Result<Config> {
         disabled_sources,
         news,
         collectors,
+        services,
         vendors,
         ignore_vendors,
         rotation_map,
@@ -1174,7 +1243,7 @@ mod tests {
 
         let msg = |raw: Value| build(raw, &env(&[])).expect_err("invalid").to_string();
         assert_eq!(msg(json!({})), "collectors: add at least one, e.g. { \"type\": \"github\", \"token\": \"${GITHUB_TOKEN}\" }");
-        assert_eq!(msg(json!({ "collectors": [{ "type": "nope" }] })), "collectors[0].type: expected one of github, host, docker, ssh");
+        assert_eq!(msg(json!({ "collectors": [{ "type": "nope" }] })), "collectors[0].type: expected one of github, host, docker, ssh, service-state");
         assert_eq!(
             msg(json!({ "collectors": [{ "type": "host" }, { "type": "host" }] })),
             "collectors[1].name: 'host' is used twice; give each collector its own name"

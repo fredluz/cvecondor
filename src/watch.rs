@@ -33,6 +33,7 @@ use crate::notify::{Notice, Notifier};
 use crate::responder::message_of;
 use crate::retry::{self, Queue};
 use crate::secrets::{Exposure, SecretFinding, finding_key};
+use crate::service::{ServiceState, service_states};
 use crate::state::{glob_match, read_state, slug, write_file_atomic, write_state};
 use crate::types::{Inventory, InventoryItem};
 use crate::upstream::{FixedRelease, Reading};
@@ -255,6 +256,10 @@ pub struct Case {
     pub status: Option<CaseStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status_reason: Option<StatusReason>,
+    /// Whether the service this case's repos run is deployed and running, resolved each cycle
+    /// (`service.rs`): `down` and `undeployed` wait on the service, `None` is unknown — treated as running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service: Option<ServiceState>,
     /// The waiting or close reason in words; absent: the reason's default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status_detail: Option<String>,
@@ -855,7 +860,7 @@ pub fn assess(input: &AssessInput) -> Assessment {
         return rated(Rating::ActToday, format!("malicious package: assume whatever installed or ran it is compromised{stake}"));
     }
     if !affected.is_empty() && affected.iter().all(|a| a.running == Some(false)) {
-        return rated(Rating::NotARealRisk, "only stopped containers carry it; it matters again if they are started".into());
+        return rated(Rating::NotARealRisk, "its service is not running; nothing carries it to a live attacker, it matters again once the service is back".into());
     }
     if !affected.is_empty() && affected.iter().all(|a| a.dev == Some(true)) {
         let rating = if input.severity == Severity::Critical { Rating::PlanIt } else { Rating::NotARealRisk };
@@ -965,6 +970,7 @@ fn new_case(key: String, kind: CaseKind, title: String, state: CaseState, reason
         pull_requests: None,
         status: None,
         status_reason: None,
+        service: None,
         status_detail: None,
         status_at: None,
     };
@@ -1008,6 +1014,52 @@ fn match_again(c: &mut Case, summary: &mut CycleSummary, at: &str) {
     c.updated_at = at.to_string();
     summary.reopened.push(c.key.clone());
 }
+
+/// The service state of one case's repos: `down` only when every `repo:` place's service
+/// resolves down (and at least one resolves), `running` when any runs, `None` for anything
+/// unproven — unknown is treated as running.
+fn case_service(c: &Case, states: &IndexMap<String, crate::service::Resolution>) -> Option<ServiceState> {
+    let mut seen = false;
+    let mut all_down = true;
+    for p in &c.places {
+        if !p.r#where.starts_with("repo:") {
+            continue;
+        }
+        if let Some(state) = states.get(&place_name(&p.host, &p.r#where)).and_then(|r| r.state) {
+            seen = true;
+            all_down &= state.is_down();
+        }
+    }
+    if seen && all_down { Some(ServiceState::Down) } else if all_down { None } else { Some(ServiceState::Running) }
+}
+
+/// Re-reads each case's service and keeps `waiting: service` current: a down service waits
+/// on the service (overriding other waits, and a run that never finished), a service back
+/// reopens its cases so the responder picks them up again.
+pub fn service_phase(config: &Config, inventory: &Inventory, cases: &mut IndexMap<String, Case>, summary: &mut CycleSummary, at: &str, now: Timestamp) {
+    let states = service_states(config, inventory, now);
+    for c in cases.values_mut() {
+        let resolution = case_service(c, &states);
+        c.service = resolution;
+        match (c.status(), resolution) {
+            (CaseStatus::Waiting, Some(state)) if state.is_down() => {
+                settle(c, CaseStatus::Waiting, Some(StatusReason::Service), "the service to come back", at);
+            }
+            (CaseStatus::Waiting, _) if c.status_reason() == Some(StatusReason::Service) => {
+                // Back (or no longer provable as down): the responder picks it up again.
+                c.state = CaseState::Pending;
+                c.reason = "its service is back".to_string();
+                c.reopened_at = Some(at.to_string());
+                c.previous_report = c.report.clone().or_else(|| c.previous_report.take());
+                c.updated_at = at.to_string();
+                mark_open(c, at);
+                summary.reopened.push(c.key.clone());
+            }
+            _ => {}
+        }
+    }
+}
+
 
 /// Adds a cycle error (redacted, cut to 300 characters).
 fn record_error(config: &Config, summary: &mut CycleSummary, place: &str, e: &dyn Display) {
@@ -1117,6 +1169,9 @@ pub fn run_cycle(config: &Config, deps: &CycleDeps) -> Result<CycleSummary> {
             mark_open(c, &cy.at);
         }
     }
+    // Service states re-read each cycle: a down service waits on the service itself, a service
+    // back reopens its case for the responder (before dispatch, so the response lands this cycle).
+    service_phase(config, &inventory, &mut cy.cases, &mut cy.summary, &cy.at, now);
 
     let vendors = detect_vendors(&inventory, config);
     cy.summary.vendors = vendors.len();
@@ -2417,6 +2472,29 @@ pub fn prepare_case(config: &Config, c: &mut Case, inventory: &Inventory, cases:
     let file = case_path(&config.state_dir, &c.key);
     let report = report_path(config, &c.key, now);
     c.report = Some(lossy(&report));
+    // A service that is down isn't exploitable: repo targets get a `running: false` for `assess`
+    // and a "(service down)" on their lines, so the rating and the responder both see it.
+    {
+        let states = service_states(config, inventory, now);
+        c.service = case_service(c, &states);
+        let down: HashSet<String> = states.iter().filter(|(_, r)| r.state.is_some_and(|s| s.is_down())).map(|(repo, _)| repo.clone()).collect();
+        c.targets = c
+            .targets
+            .iter()
+            .map(|line| {
+                let unmarked = line.strip_suffix(" (service down)").unwrap_or(line.as_str());
+                let marked = unmarked.split_whitespace().nth(1).is_some_and(|w| down.contains(w.trim_start_matches("repo:")));
+                if marked { format!("{unmarked} (service down)") } else { unmarked.to_string() }
+            })
+            .collect();
+        if let Some(affected) = c.affected.as_mut() {
+            for a in affected.iter_mut() {
+                if let Some(repo) = a.r#where.strip_prefix("repo:") {
+                    a.running = down.contains(repo).then_some(false).or(a.running);
+                }
+            }
+        }
+    }
     if c.kind == CaseKind::Vulnerability {
         let at_risk: Vec<SecretFinding> = secrets_at_risk(inventory, &c.places, &[]).into_iter().filter(|s| s.exposure != Exposure::CiSecret).collect();
         c.at_risk = Some(at_risk.iter().map(describe_secret).collect());
@@ -2467,6 +2545,23 @@ pub fn case_file(config: &Config, c: &Case, inventory: &Inventory, cases: &Index
     );
     let services: Vec<_> = inventory.services.iter().filter(|s| places.contains(&format!("{} {}", s.host, s.r#where))).collect();
     out.insert("services".into(), serde_json::to_value(services).expect("services serialize"));
+    // Each repo's service state, resolved: the responder reads it before judging exploitability.
+    let states = service_states(config, inventory, now);
+    let service_states_json: Map<String, Value> = states
+        .iter()
+        .filter(|(repo, _)| c.places.iter().any(|p| p.r#where.starts_with("repo:") && &place_name(&p.host, &p.r#where) == *repo))
+        .map(|(repo, r)| {
+            (
+                repo.clone(),
+                json!({
+                    "state": r.state.map(|s| s.as_str()).unwrap_or("unknown"),
+                    "detail": r.detail,
+                    "containers": r.containers,
+                }),
+            )
+        })
+        .collect();
+    out.insert("serviceStates".into(), Value::Object(service_states_json));
     out.insert("priority".into(), json!(config.priority));
     out.insert("actOn".into(), json!(config.responder.as_ref().map(|r| r.act_on.clone()).unwrap_or_default()));
     out.insert("runbooks".into(), json!(runbooks_for(config, c)));

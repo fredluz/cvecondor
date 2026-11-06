@@ -411,7 +411,7 @@ pub const CONTAINER_FILES: ContainerFiles =
     ContainerFiles { os_release: ["/etc/os-release", "/usr/lib/os-release"], dpkg: "/var/lib/dpkg/status", apk: "/lib/apk/db/installed" };
 
 /// `registry/org/name:tag@digest` → repository basename and tag (or the digest's first 19 characters, or `latest`).
-fn image_name(reference: &str) -> (String, String) {
+pub fn image_name(reference: &str) -> (String, String) {
     let mut at = reference.split('@');
     let repo = at.next().unwrap_or_default();
     let digest = non_empty(at.next());

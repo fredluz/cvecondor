@@ -1254,3 +1254,210 @@ fn an_update_without_a_pull_request_waits_on_the_inventory() {
     assert_eq!((c.status(), c.status_reason()), (CaseStatus::Waiting, Some(StatusReason::Applied)), "{c:?}");
     assert_eq!(c.status_detail(), "the inventory to show the fix");
 }
+
+// ---------- A service that is down ----------
+
+
+/// A config whose collectors are a GitHub one plus a `service-state` file at `path` (fresh for the fixture clock).
+fn state_config(path: &Path) -> Value {
+    json!({ "collectors": [{ "type": "github", "token": "ghp_unused" }, { "type": "service-state", "file": path }] })
+}
+
+/// An OSV stub of a HIGH advisory on the fixture's `left-pad` (npm, in `repo:acme/api`), fixed in 1.0.1.
+fn left_pad_hit(n: &mut Net) {
+    n.osv_head = "2026-10-21T09:00:00Z".into();
+    n.osv.insert("left-pad".into(), vec![stub("GHSA-d0wn", "2026-10-21T09:00:00Z")]);
+    n.records.insert(
+        "GHSA-d0wn".into(),
+        json!({ "id": "GHSA-d0wn", "modified": "2026-10-21T09:00:00Z", "summary": "left-pad RCE", "database_specific": high(), "affected": [
+            { "package": { "name": "left-pad", "ecosystem": "npm" }, "ranges": [ { "type": "ECOSYSTEM", "events": [{ "introduced": "0" }, { "fixed": "1.0.1" }] } ] }
+        ] }),
+    );
+}
+
+/// A case for `acme/api`, handed back already (with or without an open pull request).
+fn api_case(extra: Value) -> Case {
+    case("CVE-2026-9", &[("github", "repo:acme/api")], extra)
+}
+
+/// The done record a responder run writes on this case.
+fn done(h: &Harness, key: &str, report: &str, triage: Value) {
+    let file = h.config.state_dir.join(format!("{key}.md"));
+    std::fs::write(&file, report).expect("writes the report");
+    write_state(
+        &h.config.state_dir,
+        &format!("responses/{}.json", slug(key)),
+        &json!({ "key": key, "state": "done", "startedAt": "2026-10-21T08:30:00Z", "finishedAt": "2026-10-21T08:35:00Z",
+            "report": file, "prs": cvecondor::fixes::parse_prs(report), "triage": triage }),
+    )
+    .expect("writes the response");
+}
+
+/// Every container of the fixture's `api` project stopped, the `blog` one running.
+fn api_stopped() -> Value {
+    json!([
+        { "name": "blog-app-1", "project": "blog", "service": "app", "image": "wordpress:latest", "state": "running" },
+        { "name": "api-1", "project": "api", "service": "api", "image": "acme/api:latest", "state": "exited" },
+        { "name": "api-db-1", "project": "api", "service": "db", "image": "postgres:16", "state": "created" }
+    ])
+}
+
+/// Every `api` container running again.
+fn api_running() -> Value {
+    json!([
+        { "name": "blog-app-1", "project": "blog", "service": "app", "image": "wordpress:latest", "state": "running" },
+        { "name": "api-1", "project": "api", "service": "api", "image": "acme/api:latest", "state": "running" },
+        { "name": "api-db-1", "project": "api", "service": "db", "image": "postgres:16", "state": "running" }
+    ])
+}
+
+/// A case with an open fix pull request whose service is down waits on the service, not on the merge;
+/// a service that comes back puts the case back in front of the responder.
+#[test]
+fn a_case_waits_on_a_down_service_and_reopens_when_it_is_back() {
+    let net = Net::new("2026-10-20T00:00:00Z");
+    // Written before the config is built, so the collector's file is where the collector looks.
+    let dir = common::TempDir::new("cvecondor-test");
+    let file = dir.path().join("service-state.json");
+    std::fs::write(&file, json!({ "generatedAt": "2026-10-21T08:00:00Z", "containers": api_stopped() }).to_string()).expect("writes the state file");
+    let mut extra = state_config(&file);
+    extra.as_object_mut().expect("an object").extend(claude().as_object().expect("an object").clone());
+    let config = test_config(extra);
+    write_state(&config.state_dir, "inventory.json", &inventory()).expect("writes the inventory");
+    let h = Harness {
+        config, net: shared(net), rec: recorder(), responded: Arc::default(), runs: Arc::default(), clock: AtomicI64::new(parse_time("2026-10-21T08:00:00Z").expect("a time").as_millisecond()),
+    };
+    h.put_case(api_case(json!({ "state": "handled", "handledBy": "responder", "handledAt": "2026-10-20T10:00:00Z", "targets": ["github repo:acme/api left-pad 1.0.0 (package-lock.json)"] })));
+    // A run that already finished: the fix PR is open, the case waits on the merge.
+    done(
+        &h,
+        "CVE-2026-9",
+        "## Message\nUpdated, fix PR open.\n\n```cvecondor-pr\nhttps://github.com/acme/api/pull/42\n```\n",
+        json!({ "path": "update", "why": "fixed release" }),
+    );
+    h.cycle();
+    let c = &h.cases()["CVE-2026-9"];
+    assert_eq!((c.status(), c.status_reason()), (CaseStatus::Waiting, Some(StatusReason::Service)), "{c:?}");
+    assert_eq!(c.service, Some(cvecondor::service::ServiceState::Down), "{c:?}");
+    assert_eq!(c.status_detail(), "the service to come back");
+    assert!(c.pull_requests.as_deref().is_some_and(|prs| prs.len() == 1), "the open PR stays on the case: {c:?}");
+
+    // The service comes back: the case reopens for the responder this same cycle.
+    std::fs::write(&file, json!({ "generatedAt": "2026-10-21T08:12:00Z", "containers": api_running() }).to_string()).expect("writes the state file");
+    h.cycle();
+    let c = &h.cases()["CVE-2026-9"];
+    assert_eq!(c.status(), CaseStatus::Open, "{c:?}");
+    assert_eq!(c.service, Some(cvecondor::service::ServiceState::Running), "{c:?}");
+    assert_eq!(h.responded().len(), 1, "a service back re-dispatches the case");
+    assert!(matches(r"service is back", &c.reason), "{c:?}");
+}
+
+/// A new case on a repo whose service is down is never rated exploitable: it dispatches for the fix
+/// (mode UPDATE), gets "service down" on its targets and waits on the service once handled.
+#[test]
+fn a_down_service_is_never_called_exploitable_but_still_gets_its_fix() {
+    let dir = common::TempDir::new("cvecondor-test");
+    let file = dir.path().join("service-state.json");
+    std::fs::write(&file, json!({ "generatedAt": "2026-10-21T08:00:00Z", "containers": api_stopped() }).to_string()).expect("writes the state file");
+    let mut extra = state_config(&file);
+    extra.as_object_mut().expect("an object").extend(json!({ "responder": { "agent": "claude" } }).as_object().expect("an object").clone());
+    let config = test_config(extra);
+    write_state(&config.state_dir, "inventory.json", &inventory()).expect("writes the inventory");
+    let h = Harness {
+        config, net: shared(Net::new("2026-10-20T00:00:00Z")), rec: recorder(), responded: Arc::default(), runs: Arc::default(),
+        clock: AtomicI64::new(parse_time("2026-10-21T08:00:00Z").expect("a time").as_millisecond()),
+    };
+    h.cycle(); // baseline: what the feeds already carry is not news
+    h.net(left_pad_hit);
+    h.cycle();
+    let (c, mode) = h.responded().into_iter().find(|(c, _)| c.key.contains("GHSA-d0wn")).expect("the case dispatches");
+    assert_eq!(mode, Mode::Update, "a fix exists: still dispatched for it, {c:?}");
+    assert_eq!(c.service, Some(cvecondor::service::ServiceState::Down), "{c:?}");
+    assert_eq!(c.assessment.as_ref().expect("rated").rating.as_str(), "not a real risk for you", "a down service is never called exploitable: {c:?}");
+    assert!(c.targets.iter().any(|t| t.contains("repo:acme/api") && t.contains("(service down)")), "{:?}", c.targets);
+    let told = h.told(NotifyEvent::Case);
+    assert!(told.iter().all(|n| !n.text.contains("act today") && !n.text.contains("exploitable")), "no urgent line for a down service");
+
+    // The response that opened the fix PR settles it as waiting on the service.
+    done(
+        &h,
+        &c.key,
+        "## Message\nUpdated, fix PR open.\n\n```cvecondor-pr\nhttps://github.com/acme/api/pull/42\n```\n",
+        json!({ "path": "update", "why": "fixed release" }),
+    );
+    h.cycle();
+    let c = &h.cases()[&c.key];
+    assert_eq!((c.status(), c.status_reason()), (CaseStatus::Waiting, Some(StatusReason::Service)), "{c:?}");
+}
+
+/// A missing or stale state file never marks a service down: the case waits on its merge like always.
+#[test]
+fn an_unknown_service_is_treated_as_running() {
+    let dir = common::TempDir::new("cvecondor-test");
+    let file = dir.path().join("service-state.json");
+    let mut extra = state_config(&file);
+    extra.as_object_mut().expect("an object").extend(claude().as_object().expect("an object").clone());
+    let config = test_config(extra); // the file is never written
+    write_state(&config.state_dir, "inventory.json", &inventory()).expect("writes the inventory");
+    let h = Harness {
+        config, net: shared(Net::new("2026-10-20T00:00:00Z")), rec: recorder(), responded: Arc::default(), runs: Arc::default(),
+        clock: AtomicI64::new(parse_time("2026-10-21T08:00:00Z").expect("a time").as_millisecond()),
+    };
+    h.put_case(api_case(json!({ "state": "handled", "handledBy": "responder", "handledAt": "2026-10-20T10:00:00Z" })));
+    done(
+        &h,
+        "CVE-2026-9",
+        "## Message\nUpdated, fix PR open.\n\n```cvecondor-pr\nhttps://github.com/acme/api/pull/42\n```\n",
+        json!({ "path": "update", "why": "fixed release" }),
+    );
+    h.cycle();
+    let c = &h.cases()["CVE-2026-9"];
+    assert_eq!((c.status(), c.status_reason()), (CaseStatus::Waiting, Some(StatusReason::User)), "{c:?}");
+
+    // The same when the file exists but is stale (old generatedAt): never counted down.
+    std::fs::write(&file, json!({ "generatedAt": "2026-10-20T00:00:00Z", "containers": api_stopped() }).to_string()).expect("writes the state file");
+    h.cycle();
+    let c = &h.cases()["CVE-2026-9"];
+    assert_eq!((c.status(), c.status_reason()), (CaseStatus::Waiting, Some(StatusReason::User)), "{c:?}");
+}
+
+/// A repo the config marks `deployed: false` resolves undeployed; a repo the file doesn't cover but the
+/// config flags `running: false` resolves down.
+#[test]
+fn the_services_list_marks_what_the_state_file_cannot_see() {
+    let dir = common::TempDir::new("cvecondor-test");
+    let file = dir.path().join("service-state.json");
+    std::fs::write(&file, json!({ "generatedAt": "2026-10-21T08:00:00Z", "containers": [] }).to_string()).expect("writes the state file");
+    let mut extra = state_config(&file);
+    extra
+        .as_object_mut()
+        .expect("an object")
+        .extend(json!({ "services": [ { "repo": "acme/blog", "deployed": false, "note": "moved off the VPS" }, { "repo": "acme/api", "running": false } ] }).as_object().expect("an object").clone());
+    let config = test_config(extra);
+    let inventory = inventory();
+    let states = cvecondor::service::service_states(&config, &inventory, parse_time("2026-10-21T08:06:00Z").expect("a time"));
+    assert_eq!(states["acme/blog"].state, Some(cvecondor::service::ServiceState::Undeployed), "{states:?}");
+    assert_eq!(states["acme/blog"].detail, "undeployed: moved off the VPS");
+    assert_eq!(states["acme/api"].state, Some(cvecondor::service::ServiceState::Down), "{states:?}");
+    assert_eq!(states["acme/worker"].state, None, "no mapping, no containers: unknown, treated as running");
+}
+
+/// A repo bound to its compose project by `services[].project` resolves from the file's containers.
+#[test]
+fn a_project_mapping_reads_the_projects_containers() {
+    let dir = common::TempDir::new("cvecondor-test");
+    let file = dir.path().join("service-state.json");
+    std::fs::write(&file, json!({ "generatedAt": "2026-10-21T08:00:00Z", "containers": api_stopped() }).to_string()).expect("writes the state file");
+    let mut extra = state_config(&file);
+    extra
+        .as_object_mut()
+        .expect("an object")
+        .extend(json!({ "services": [ { "repo": "acme/api", "project": "api" } ] }).as_object().expect("an object").clone());
+    let config = test_config(extra);
+    let inventory = inventory();
+    let states = cvecondor::service::service_states(&config, &inventory, parse_time("2026-10-21T08:06:00Z").expect("a time"));
+    assert_eq!(states["acme/api"].state, Some(cvecondor::service::ServiceState::Down), "{states:?}");
+    assert!(states["acme/api"].containers.iter().any(|l| l.contains("api-1")), "{:?}", states["acme/api"].containers);
+    // A repo without a mapping whose project name matches anyway resolves the same.
+    assert_eq!(states["acme/blog"].state, Some(cvecondor::service::ServiceState::Running), "{states:?}");
+}
