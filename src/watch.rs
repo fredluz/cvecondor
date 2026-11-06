@@ -1002,20 +1002,28 @@ fn by_alias(cases: &IndexMap<String, Case>, ids: &[String]) -> Option<String> {
     cases.values().find(|c| ids.iter().any(|id| c.key == *id || c.aliases.contains(id))).map(|c| c.key.clone())
 }
 
-/// Puts the case back in front of the user: a fix shipped or was announced. A closed case stays so: `fixed`
-/// ones re-match through `reconcile` instead, `not-applicable` and `dismissed` never do.
-fn reopen(c: &mut Case, summary: &mut CycleSummary, at: &str, reason: String) {
+/// Puts the case back in front of the user: what it was told or settled on has changed. A closed case stays so:
+/// `fixed` ones re-match through `reconcile` instead, `not-applicable` and `dismissed` never do.
+fn raise(c: &mut Case, summary: &mut CycleSummary, at: &str, reason: String) {
     if c.status() == CaseStatus::Closed {
         return;
     }
     c.state = CaseState::Pending;
-    c.fix_available = true;
     c.reopened_at = Some(at.to_string());
     c.reason = reason;
     c.previous_report = c.report.clone().or_else(|| c.previous_report.take());
     c.updated_at = at.to_string();
     mark_open(c, at);
     summary.reopened.push(c.key.clone());
+}
+
+/// The same, because a fix shipped or was announced.
+fn reopen(c: &mut Case, summary: &mut CycleSummary, at: &str, reason: String) {
+    if c.status() == CaseStatus::Closed {
+        return;
+    }
+    c.fix_available = true;
+    raise(c, summary, at, reason);
 }
 
 /// The case matched the inventory again after being closed as fixed.
@@ -1826,6 +1834,10 @@ impl Cycle<'_, '_> {
                     c.state = CaseState::Pending;
                     c.reason = "now listed as exploited in the wild (CISA KEV)".to_string();
                     mark_open(c, &at);
+                } else if c.state == CaseState::Handled {
+                    // A settled issue is raised again only for what changes what to do: exploitation in the wild is that.
+                    c.items.get_or_insert_with(Vec::new).push(item.clone());
+                    raise(c, &mut self.summary, &at, format!("now exploited in the wild: {}", item.title));
                 }
             }
             if c.state == CaseState::Handled && !c.fix_available && FIX_WORDS.is_match(&format!("{} {}", item.title, item.text)) {
@@ -1963,7 +1975,49 @@ impl Cycle<'_, '_> {
             let id_slug = slug(&item.id);
             let tail = if id_slug.len() > 24 { &id_slug[id_slug.len() - 24..] } else { id_slug.as_str() };
             let key = format!("vendor:{}:{}", vendor.id, if tail.is_empty() { slug(&item.title) } else { tail.to_string() });
-            if self.cases.contains_key(&key) {
+            // An item about what a case already covers joins that case: the case it keys to, the case the item is
+            // already part of, or the case that carries its link or one of its CVE ids.
+            let linked = if self.cases.contains_key(&key) {
+                Some(key.clone())
+            } else {
+                self.cases
+                    .values()
+                    .find(|c| {
+                        c.items.iter().flatten().any(|i| i.source == item.source && i.id == item.id)
+                            || (!item.url.is_empty() && c.urls.iter().any(|u| u == &item.url))
+                            || item.cves.iter().any(|id| c.aliases.contains(id))
+                    })
+                    .map(|c| c.key.clone())
+            };
+            if let Some(linked) = linked {
+                let Some(c) = self.cases.get_mut(&linked) else { continue };
+                let new = !c.items.iter().flatten().any(|i| i.source == item.source && i.id == item.id);
+                if new {
+                    c.items.get_or_insert_with(Vec::new).push(item.clone());
+                }
+                c.urls = unique(c.urls.iter().cloned().chain(std::iter::once(item.url.clone()).filter(|u| !u.is_empty())));
+                c.sources = unique(c.sources.iter().cloned().chain(std::iter::once(item.source.clone())));
+                c.aliases = unique(c.aliases.iter().cloned().chain(item.cves.iter().cloned()));
+                if c.vendor.as_deref() == Some(vendor.id.as_str()) {
+                    c.targets = unique(c.targets.iter().cloned().chain(vendor.evidence.iter().cloned()));
+                    c.places = merge_places(&c.places, &vendor.places);
+                }
+                c.updated_at = at.clone();
+                // A handled or closed case pushes nothing for a re-report; it reopens only when the item adds
+                // something that changes what to do: exploitation in the wild, or a fix it still lacks.
+                if item.exploited == Some(true) && c.exploited != Some(true) {
+                    c.exploited = Some(true);
+                    if c.state == CaseState::Watch && c.status() != CaseStatus::Closed {
+                        c.state = CaseState::Pending;
+                        c.reason = "now listed as exploited in the wild (CISA KEV)".to_string();
+                        mark_open(c, &at);
+                    } else if c.state == CaseState::Handled {
+                        raise(c, &mut self.summary, &at, format!("now exploited in the wild: {}", item.title));
+                    }
+                }
+                if c.state == CaseState::Handled && !c.fix_available && FIX_WORDS.is_match(&format!("{} {}", item.title, item.text)) {
+                    reopen(c, &mut self.summary, &at, format!("fix announced: {}; apply it and remove the temporary mitigation", item.title));
+                }
                 continue;
             }
             // Without a classifier key the name match plus the incident-word filter decides.
@@ -2263,7 +2317,8 @@ impl Cycle<'_, '_> {
             batches.push(batch.clone());
             write_file_atomic(&report, &body.join("\n"))?;
             // What can't wait interrupts the user, one line each: what, where, what is being done. The rest waits for the agent in charge.
-            for key in unbatched.iter().filter(|k| rating_of(&self.cases[k.as_str()]) == Rating::ActToday) {
+            // A reopened case was told and settled already: it never interrupts again — its response reports what changed, and only it sends a line.
+            for key in unbatched.iter().filter(|k| rating_of(&self.cases[k.as_str()]) == Rating::ActToday && self.cases[k.as_str()].reopened_at.is_none()) {
                 let c = &self.cases[key.as_str()];
                 let p = &prepared[key.as_str()];
                 let doing = if self.deps.respond.is_some() && c.kind == CaseKind::Vulnerability {

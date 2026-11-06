@@ -517,6 +517,107 @@ fn with_a_responder_a_vendor_incident_goes_to_it_and_the_watcher_pages_nobody_it
     assert!(matches(r"^1 new case\(s\): 1 act this week", &notice.title), "{}", notice.title);
 }
 
+/// A settled issue is never raised twice: a second source's copy of the same story joins the handled case and
+/// pushes nothing; only an item that changes what to do (exploitation in the wild, a fix it lacks) reopens it.
+#[test]
+fn a_second_source_reporting_a_handled_vendor_incident_joins_the_case_and_sends_nothing() {
+    let mut net = Net::new("2026-10-20T00:00:00Z");
+    net.feeds.insert("news:hacker-news".into(), rss(&[]));
+    net.feeds.insert("news:securityweek".into(), rss(&[]));
+    let h = Harness::new(net, claude());
+    h.cycle();
+    h.net(|n| {
+        n.feeds.insert(
+            "news:hacker-news".into(),
+            rss(&[RssItem {
+                guid: "hn-railway-breach",
+                title: "Railway security incident: unauthorized access to customer environment variables",
+                description: "Railway says an attacker accessed secrets (CVE-2026-9876); rotate your tokens.",
+            }]),
+        );
+    });
+    h.advance(15 * 60_000);
+    h.cycle_judging("security-incident");
+    assert_eq!(h.responded().len(), 1);
+    let key = format!("vendor:railway:{}", slug("hn-railway-breach"));
+    assert_eq!(h.cases()[&key].state, CaseState::Handled);
+
+    // Another feed tells the same story and links the same CVE: it joins the case, nothing is sent again.
+    h.net(|n| {
+        n.feeds.insert(
+            "news:securityweek".into(),
+            rss(&[RssItem {
+                guid: "sw-railway-breach",
+                title: "Railway breach under investigation",
+                description: "The breach is now tracked as CVE-2026-9876; rotate your tokens.",
+            }]),
+        );
+    });
+    h.advance(15 * 60_000);
+    h.cycle_judging("security-incident");
+    assert_eq!(h.responded().len(), 1, "the joined item starts no new response");
+    let c = &h.cases()[&key];
+    assert_eq!(c.state, CaseState::Handled, "it joins; it does not reopen");
+    assert_eq!(h.cases().values().filter(|c| c.kind == cvecondor::watch::CaseKind::Vendor).count(), 1, "no second case for the same incident");
+    assert!(c.sources.contains(&"news:securityweek".to_string()), "the second source is recorded");
+    assert_eq!(c.items.as_ref().map(|i| i.len()), Some(2), "both reports stay on the case");
+    let urgent: Vec<_> = h.told(NotifyEvent::Urgent).into_iter().filter(|n| n.key.as_deref() == Some(key.as_str())).collect();
+    assert!(urgent.is_empty(), "a settled issue is never raised twice");
+}
+
+#[test]
+fn a_handled_case_reopens_only_for_what_changes_what_to_do() {
+    let mut net = Net::new("2026-10-20T00:00:00Z");
+    net.feeds.insert("cisa-kev".into(), json!({ "vulnerabilities": [] }).to_string());
+    let h = Harness::new(net, claude());
+    h.cycle(); // baseline
+    h.put_case(case(
+        "vendor:railway:hn-railway-breach",
+        &[("github", "repo:acme/api")],
+        json!({
+            "kind": "vendor", "title": "Railway: breach reported", "state": "handled",
+            "report": "/data/reports/earlier.md",
+            "aliases": ["CVE-2026-9876"], "urls": ["https://example.org/hn-railway-breach"], "sources": ["news:hacker-news"],
+            "items": [{ "source": "news:hacker-news", "id": "hn-railway-breach", "title": "Railway breach", "text": "", "url": "https://example.org/hn-railway-breach" }]
+        }),
+    ));
+    // The same item again, only edited ("still under investigation"): joins the case, no new response.
+    h.net(|n| {
+        n.feeds.insert(
+            "news:hacker-news".into(),
+            rss(&[RssItem {
+                guid: "hn-railway-breach",
+                title: "Railway breach under investigation",
+                description: "Still under investigation; rotate your tokens.",
+            }]),
+        );
+    });
+    h.advance(15 * 60_000);
+    h.cycle();
+    assert!(h.responded().is_empty(), "a re-report of what was handled starts nothing");
+    assert_eq!(h.cases()["vendor:railway:hn-railway-breach"].state, CaseState::Handled);
+
+    // CISA lists it as exploited: that changes what to do, so the case reopens and its reason says what is new.
+    h.net(|n| {
+        n.feeds.insert(
+            "cisa-kev".into(),
+            json!({
+                "vulnerabilities": [{ "cveID": "CVE-2026-9876", "vendorProject": "Railway", "product": "Railway", "vulnerabilityName": "token leak", "dateAdded": "2026-10-21", "shortDescription": "Seen exploited.", "requiredAction": "Rotate." }]
+            })
+            .to_string(),
+        );
+    });
+    h.cycle();
+    let c = &h.cases()["vendor:railway:hn-railway-breach"];
+    assert_eq!(c.exploited, Some(true));
+    assert!(c.reopened_at.is_some());
+    assert!(matches(r"^now exploited in the wild: ", &c.reason), "{}", c.reason);
+    assert!(!c.fix_available, "a KEV listing announces no fix");
+    assert_eq!(h.responded().len(), 1, "the responder hears about the exploitation");
+    assert_eq!(h.responded()[0].0.previous_report.as_deref(), Some("/data/reports/earlier.md"));
+    assert!(h.told(NotifyEvent::Urgent).is_empty(), "the reopened case's line comes from its response, not a new page");
+}
+
 #[test]
 fn acting_is_a_per_place_opt_in() {
     let config = test_config(json!({ "responder": { "agent": "claude", "actOn": ["acme/api", "api.example.com"] } }));

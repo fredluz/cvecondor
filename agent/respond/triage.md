@@ -13,7 +13,7 @@ A service marked down or undeployed (`serviceStates` in the case file, `(service
 5. **How serious for this user**: the rating (`common.md`).
 6. **In `actOn` or not**: the mode under "This case".
 
-Read `related` in the case file and the reports it names: if the same issue was handled this week and nothing changed, the path is `already-handled`. A case with `splitFrom` was opened from that case's fixed releases: it was handed over, not handled. A **REOPENED** case means the fix it waited for has shipped: the path is `update` (it also removes the workaround).
+Read `related` in the case file and the reports it names: if the same issue was handled this week and nothing changed, the path is `already-handled`. A case with `splitFrom` was opened from that case's fixed releases: it was handed over, not handled. A **REOPENED** case means a fix it waited for has shipped (`case.reason` says "fix released"/"fix announced"): the path is `update` (it also removes the workaround). Any other reopen — another source's copy of the same story, a service coming back, the same advisory re-reported — is raised again only if it changes what the user must do: a new affected version, exploitation in the wild, or a new step for them. If it doesn't, the earlier handling stands: `already-handled`, a short report naming the earlier one, send nothing, stop. A settled issue is never raised twice, so no urgent line repeats the same ask: a line goes out only for what is new, and it says what is new.
 
 ## Pick the path
 
@@ -27,7 +27,7 @@ Take the **first** row that matches, top to bottom: a breach or a CA incident ta
 | A vendor that holds the user's keys was breached (`case.kind` is `vendor`), or a malicious package version (a `MAL-` alias) | `breach.md`, even when a clean version exists (it covers that) |
 | A certificate authority is compromised or distrusted (the case title starts with "CA incident", or its source is `ca-incidents`) | `distrust.md`, even when fixed bundles exist: it covers those updates, and every other trust store, too |
 | The sources name fixed releases that some component of the case doesn't show (a target without `fixed in`, a library's carriers), and the case has no `splitFrom` | `split`: fact 1 is all it needs; write the fixed releases (below) in a short report, send nothing, stop. The watcher opens one case per place from them, each with the release it moves to, and they come back through triage |
-| Fix released, mode UPDATE or ACT (or REOPENED) | `update.md` |
+| Fix released, mode UPDATE or ACT (or REOPENED for a fix) | `update.md` |
 | Fix released, mode PROPOSE | `propose.md` |
 | No fix, not exploitable here | `not-exploitable.md` |
 | No fix, exploitable here, mode ACT | `workaround.md` (it hands over to `shutdown.md` only if nothing narrower removes the risk) |

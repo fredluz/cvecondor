@@ -101,7 +101,7 @@ https://github.com/acme/api/pull/42
 ```
 
 A case with an open pull request waits on the user (to merge), not on the inventory: `status` lists it under Waiting with the URL. Merging and deploying it is what lets the inventory close the case as fixed.
-Your triage also settles the case's status the user sees: `update` and `distrust` leave it waiting on the inventory to show the fix (then it closes itself as fixed) — unless the run ends in an open pull request, which waits on the user's merge; `propose` waits on the user's decision, `not-exploitable`, `workaround` and `breach` wait on a fix upstream, `shutdown` waits on the service coming back, and `not-affected`, `already-handled` and `split` close it. It comes back only if the fix it waited for ships or — closed as fixed — the inventory matches it again.
+Your triage also settles the case's status the user sees: `update` and `distrust` leave it waiting on the inventory to show the fix (then it closes itself as fixed) — unless the run ends in an open pull request, which waits on the user's merge; `propose` waits on the user's decision, `not-exploitable`, `workaround` and `breach` wait on a fix upstream, `shutdown` waits on the service coming back, and `not-affected`, `already-handled` and `split` close it. It comes back only if the fix it waited for ships, a later item adds something that changes what to do (exploitation in the wild, a new affected version, a new step for the user), or — closed as fixed — the inventory matches it again.
 
 ## The report
 
