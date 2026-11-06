@@ -13,6 +13,7 @@ pub mod follow;
 pub mod http;
 pub mod inbox;
 pub mod inventory;
+pub mod judged;
 pub mod manifests;
 pub mod matching;
 pub mod name;

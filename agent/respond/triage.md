@@ -13,7 +13,17 @@ A service marked down or undeployed (`serviceStates` in the case file, `(service
 5. **How serious for this user**: the rating (`common.md`).
 6. **In `actOn` or not**: the mode under "This case".
 
-Read `related` in the case file and the reports it names: if the same issue was handled this week and nothing changed, the path is `already-handled`. A case with `splitFrom` was opened from that case's fixed releases: it was handed over, not handled. A **REOPENED** case means a fix it waited for has shipped (`case.reason` says "fix released"/"fix announced"): the path is `update` (it also removes the workaround). Any other reopen — another source's copy of the same story, a service coming back, the same advisory re-reported — is raised again only if it changes what the user must do: a new affected version, exploitation in the wild, or a new step for them. If it doesn't, the earlier handling stands: `already-handled`, a short report naming the earlier one, send nothing, stop. A settled issue is never raised twice, so no urgent line repeats the same ask: a line goes out only for what is new, and it says what is new.
+Read `related` in the case file and the reports it names. Each vulnerability is judged once per place, and every new one is judged:
+- **A new advisory on a package already judged here** is judged, but not from scratch. A `related` entry with `sameInstalledPackageAndPlace` carries the earlier verdict (`verdict`: its path and the fact that decided it), the evidence (`report`) and what it was judged at (`judgedAt`: version and exposure, with `unchangedSince`). While `unchangedSince` is true, take what the earlier report established about that package and place (is the feature used, is it reachable from outside) as given, and spend the run on what is new in this advisory: its own trigger, its fix, exploitation. Say in the report that you reused it.
+- **The same issue handled this week, nothing changed:** the path is `already-handled`.
+- A case that groups several advisories on one place (`case.advisories`) is one run: judge each of them there.
+- A case with `splitFrom` was opened from that case's fixed releases: it was handed over, not handled.
+- A **REOPENED** case means a fix it waited for has shipped (`case.reason` says "fix released"/"fix announced"): the path is `update` (it also removes the workaround).
+- A case reopened because **its service is back** (`case.reason` says so) is a service you stopped (`shutdown`) running again: judge it fresh, as exposure changed. A service that merely stopped and started again never reaches you.
+- A case reopened because it **reaches a new place** (`case.reason` says "reaches a new place: …") is the same advisory at a place it was never judged at: judge that place. The places in `case.judged` (and the earlier report) stand; don't redo them while their version and exposure are unchanged.
+- Any other reopen — another source's copy of the same story, the same advisory re-reported — is raised again only if it changes what the user must do: a new affected version, exploitation in the wild, or a new step for them. If it doesn't, the earlier handling stands: `already-handled`, a short report naming the earlier one, send nothing, stop. A settled issue is never raised twice, so no urgent line repeats the same ask: a line goes out only for what is new, and it says what is new.
+
+A section "Already on record for this case" at the end of this brief (an open pull request, an earlier report) and "What the earlier run did" (a retry) say what is done: continue from it, don't redo it.
 
 ## Pick the path
 

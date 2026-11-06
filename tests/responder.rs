@@ -404,3 +404,78 @@ fi
     let urgent: Vec<String> = rec.notices().into_iter().filter(|n| n.event.as_str() == "urgent").map(|n| n.title).collect();
     assert_eq!(urgent, ["Working around it on api now."], "said once across both runs; the finished retry's own act-today line is not owed either: the user was told");
 }
+
+/// The text of the prompt the run in `dir/work/` was given (the only run there).
+fn prompt_of(dir: &Path) -> String {
+    let work: Vec<_> = fs::read_dir(dir.join("work")).expect("the work dir exists").map(|e| e.expect("entry").path()).collect();
+    assert_eq!(work.len(), 1);
+    fs::read_to_string(work[0].join("prompt.md")).expect("the prompt")
+}
+
+/// A retry is told what the run before it already did, so it continues instead of re-verifying.
+#[test]
+fn a_retry_is_told_what_the_earlier_run_already_did() {
+    let dir = TempDir::new("cvecondor-responder");
+    let agent = dir.path().join("fake-agent.sh");
+    fs::write(&agent, "printf '## Message\\nact this week: done.\\n' > \"$CVECONDOR_WORKDIR/report.md\"\n").expect("writes the agent");
+    let config = config_in(&dir, json!({ "command": ["sh", agent] }), &[("GITHUB_TOKEN".to_string(), "ghp_unused".to_string())].into());
+    let report = dir.path().join("reports").join("q.md");
+    fs::create_dir_all(report.parent().expect("a dir")).expect("makes the reports dir");
+    fs::write(&report, "## Message\nact this week: the lockfile is on 1.0.0, no fix yet; opened the PR, was checking the second repo.\n").expect("writes the earlier report");
+    // The run that ended on a timeout: its triage, its pull request and its report are on record.
+    cvecondor::state::write_state(
+        dir.path(),
+        "responses/q.json",
+        &json!({
+            "key": "q", "state": "failed", "startedAt": "2026-10-21T08:00:00Z", "finishedAt": "2026-10-21T09:00:00Z", "report": report,
+            "prs": ["https://github.com/acme/api/pull/42"], "triage": { "path": "update", "why": "1.0.1 is released" },
+            "error": "timed out after 60 min"
+        }),
+    )
+    .expect("writes the earlier record");
+    let c = case("q", "handled", &report);
+    let case_file = dir.path().join("q.json");
+    fs::write(&case_file, "{}").expect("writes the case");
+
+    start_response_with(&config, &c, &case_file, Mode::Update, recorder().notifier(), &StartOptions { retry: true, ..StartOptions::default() }).expect("starts");
+    wait_running();
+    let prompt = prompt_of(dir.path());
+    for part in [
+        "\n## What the earlier run did\n",
+        "It ended with: timed out after 60 min",
+        "`update: 1.0.1 is released`",
+        "https://github.com/acme/api/pull/42",
+        "opened the PR, was checking the second repo",
+    ] {
+        assert!(prompt.contains(part), "the retry's brief names {part:?}");
+    }
+
+    // A first run is told nothing of the kind.
+    let fresh = TempDir::new("cvecondor-responder");
+    let config = config_in(&fresh, json!({ "command": ["sh", agent] }), &[("GITHUB_TOKEN".to_string(), "ghp_unused".to_string())].into());
+    start_response_with(&config, &c, &case_file, Mode::Update, recorder().notifier(), &StartOptions::default()).expect("starts");
+    wait_running();
+    assert!(!prompt_of(fresh.path()).contains("\n## What the earlier run did\n"));
+}
+
+/// A case with a fix pull request for this advisory, or an earlier report, is not re-verified from scratch.
+#[test]
+fn a_run_for_a_case_a_pull_request_already_covers_is_told_to_build_on_it() {
+    let dir = TempDir::new("cvecondor-responder");
+    let config = config_in(&dir, json!({ "agent": "claude" }), &[("GITHUB_TOKEN".to_string(), "ghp_unused".to_string())].into());
+    let case_file = dir.path().join("q.json");
+    fs::write(&case_file, "{}").expect("writes the case");
+    let plain = case("q", "pending", &dir.path().join("q.md"));
+    let prompt = build_prompt(&config, &plain, &case_file, Mode::Update, dir.path(), &[]).expect("the prompt");
+    assert!(!prompt.contains("\n## Already on record for this case\n"), "a first run has nothing on record");
+
+    let covered = Case {
+        pull_requests: Some(vec!["https://github.com/acme/api/pull/42".to_string()]),
+        previous_report: Some("/data/reports/earlier.md".to_string()),
+        ..plain
+    };
+    let prompt = build_prompt(&config, &covered, &case_file, Mode::Update, dir.path(), &[]).expect("the prompt");
+    assert!(prompt.contains("A fix pull request for exactly this advisory is already open: https://github.com/acme/api/pull/42"));
+    assert!(prompt.contains("`already-handled`"));
+    assert!(prompt.contains("The earlier report (/data/reports/earlier.md) established"));
+}
