@@ -1796,3 +1796,80 @@ fn advisories_pending_on_one_place_are_judged_in_one_run_also_when_they_arrive_i
     assert_eq!(responded.len(), 1, "one run for every advisory pending on the place");
     assert!(matches(r"^3 vulnerabilities in github repo:acme/api", &responded[0].0.title), "{}", responded[0].0.title);
 }
+
+/// The fixture inventory with `items` added and a new collection time (a refreshed inventory).
+fn inventory_with(items: Value, collected_at: &str) -> Inventory {
+    let mut v = serde_json::to_value(inventory()).expect("serializes");
+    v["items"].as_array_mut().expect("items").extend(items.as_array().cloned().unwrap_or_default());
+    v["collectedAt"] = json!(collected_at);
+    serde_json::from_value(v).expect("an inventory")
+}
+
+fn npm_item(place: &str, name: &str) -> Value {
+    json!({ "host": "github", "where": place, "kind": "package", "ecosystem": "npm", "name": name, "version": "1.0.0", "path": "package-lock.json" })
+}
+
+/// An advisory a handled case covers reaches a place the case was never judged at: that place is judged, once; the
+/// places judged before stand. Nothing re-runs when the place was judged.
+#[test]
+fn an_advisory_reaching_a_new_place_is_judged_there_once() {
+    let h = Harness::new(Net::new("2026-10-20T00:00:00Z"), claude());
+    h.cycle(); // baseline
+    h.put_case(judged_case(json!({})));
+    h.net(|n| {
+        gone_advisory_returns(n);
+        n.osv_head = "2026-10-21T09:00:00Z".into();
+    });
+    h.cycle();
+    assert_eq!(h.responded().len(), 0, "the advisory still reaches only the place it was judged at");
+    assert_eq!(h.cases()["CVE-2026-9000"].status(), CaseStatus::Waiting);
+
+    // The inventory is refreshed: the same package now also sits in another repo. The advisory itself is unchanged.
+    write_state(&h.config.state_dir, "inventory.json", &inventory_with(json!([npm_item("repo:acme/web", "left-pad")]), "2026-10-21T09:00:00.000Z")).expect("writes");
+    h.cycle();
+    let responded = h.responded();
+    assert_eq!(responded.len(), 1, "the new place is judged");
+    let c = &responded[0].0;
+    assert_eq!(c.key, "CVE-2026-9000");
+    assert!(matches(r"^reaches a new place: acme/web; the places judged before stand", &c.reason), "{}", c.reason);
+    assert_eq!(c.previous_report.as_deref(), Some("/data/reports/earlier.md"), "the earlier report goes with it");
+    assert!(c.judged.as_ref().is_some_and(|j| j.items.len() == 1), "what was judged before is in the brief: {c:?}");
+
+    // Its response finishes; the place now counts as judged and nothing comes back for it.
+    done(&h, "CVE-2026-9000", "## Message\nact this week: acme/web judged too.\n", json!({ "path": "not-exploitable", "why": "never called there either" }));
+    h.cycle();
+    h.cycle();
+    assert_eq!(h.responded().len(), 1, "each place is judged once");
+    let c = &h.cases()["CVE-2026-9000"];
+    assert!(c.judged.as_ref().is_some_and(|j| j.judged_place("github", "repo:acme/web") && j.judged_place("github", "repo:acme/api")), "{c:?}");
+}
+
+/// A run is bounded by its place: advisories are grouped when they reach exactly the same places, never chained
+/// through a place they share, so no run covers more than one of its advisories does.
+#[test]
+fn grouping_is_per_place_and_never_chains_advisories_through_a_shared_place() {
+    let h = Harness::new(Net::new("2026-10-20T00:00:00Z"), claude());
+    // left-pad is in two repos; right-pad only in `acme/api`, which they share.
+    write_state(&h.config.state_dir, "inventory.json", &inventory_with(json!([npm_item("repo:acme/web", "left-pad")]), "2026-10-21T06:00:00.000Z")).expect("writes");
+    h.cycle(); // baseline
+    h.net(|n| {
+        n.osv_head = "2026-10-21T09:00:00Z".into();
+        n.osv.insert("left-pad".into(), vec![stub("GHSA-wide", "2026-10-21T09:00:00Z")]);
+        n.osv.insert("right-pad".into(), vec![stub("GHSA-one", "2026-10-21T09:00:00Z"), stub("GHSA-two", "2026-10-21T09:00:00Z")]);
+        for (id, cve, what) in [("GHSA-wide", "CVE-2026-1001", "left-pad flaw"), ("GHSA-one", "CVE-2026-1002", "right-pad flaw"), ("GHSA-two", "CVE-2026-1003", "right-pad other flaw")] {
+            n.records.insert(
+                id.into(),
+                json!({ "id": id, "modified": "2026-10-21T09:00:00Z", "aliases": [cve], "summary": what, "database_specific": high(), "affected": [] }),
+            );
+        }
+    });
+    h.cycle();
+    let responded = h.responded();
+    assert_eq!(responded.len(), 2, "one run for the two advisories on `acme/api`, one for the advisory on both repos");
+    let place_names = |c: &Case| c.places.iter().map(|p| p.r#where.clone()).collect::<Vec<_>>();
+    let grouped = responded.iter().map(|(c, _)| c).find(|c| c.advisories.is_some()).expect("the right-pad advisories are grouped");
+    assert_eq!(grouped.advisories.as_ref().map(Vec::len), Some(2));
+    assert_eq!(place_names(grouped), ["repo:acme/api"], "the run covers only the place its advisories share");
+    let wide = responded.iter().map(|(c, _)| c).find(|c| c.key == "CVE-2026-1001").expect("the wider advisory runs on its own");
+    assert_eq!(place_names(wide), ["repo:acme/api", "repo:acme/web"]);
+}

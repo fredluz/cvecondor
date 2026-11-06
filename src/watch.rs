@@ -317,6 +317,19 @@ impl Case {
         self.status() == CaseStatus::Closed && self.status_reason() == Some(StatusReason::Fixed)
     }
 
+    /// The places among `candidates` this case was never judged at: not in what its response judged or, with no
+    /// judgement on record, not among the places it already covers.
+    fn unjudged_places(&self, candidates: &[Place]) -> Vec<Place> {
+        candidates
+            .iter()
+            .filter(|p| match &self.judged {
+                Some(j) => !j.judged_place(&p.host, &p.r#where),
+                None => !self.places.contains(p),
+            })
+            .cloned()
+            .collect()
+    }
+
     /// The derived lifecycle for a case with no recorded one: triage paths settle handled cases, the rest comes
     /// from the triage state (`migrate_case` also looks at waits).
     fn derived(&self) -> (CaseStatus, Option<StatusReason>, String) {
@@ -1318,6 +1331,30 @@ pub fn run_cycle(config: &Config, deps: &CycleDeps) -> Result<CycleSummary> {
 /// case of one was first seen within this many days of the other.
 const NODE_RELEASE_DAYS: i64 = 14;
 
+/// The most advisories one response judges: a long wave on one place is split into runs of this size, so no run is
+/// too long for `responder.timeoutMinutes`.
+const MAX_GROUPED: usize = 20;
+
+/// Indexes of `weights`, in order, in runs whose weights add up to at most `cap` (a single weight above it is a run of
+/// its own).
+fn chunks_by_weight(weights: &[usize], cap: usize) -> Vec<Vec<usize>> {
+    let mut runs: Vec<Vec<usize>> = Vec::new();
+    let mut total = 0;
+    for (i, w) in weights.iter().enumerate() {
+        match runs.last_mut() {
+            Some(run) if total + w <= cap => {
+                run.push(i);
+                total += w;
+            }
+            _ => {
+                runs.push(vec![i]);
+                total = *w;
+            }
+        }
+    }
+    runs
+}
+
 /// What one half of a Node security release (the blog post, or the security-wg index entries) brings to the case of the other half.
 struct NodeHalf {
     title: String,
@@ -1400,12 +1437,18 @@ impl Cycle<'_, '_> {
                     continue;
                 }
                 let prior = seen.insert(hit.id.clone(), hit.modified.clone());
-                if prior.as_deref() == Some(hit.modified.as_str()) {
+                let existing = by_alias(&self.cases, std::slice::from_ref(&hit.id)).and_then(|k| self.cases.get(&k));
+                // An advisory a handled case already covers now reaches a place it was never judged at: that place is judged.
+                let reaches_new_place = existing.is_some_and(|c| {
+                    c.kind == CaseKind::Vulnerability
+                        && c.state == CaseState::Handled
+                        && !c.unjudged_places(&hit.items.iter().map(|i| Place { host: i.host.clone(), r#where: i.r#where.clone() }).collect::<Vec<_>>()).is_empty()
+                });
+                if prior.as_deref() == Some(hit.modified.as_str()) && !reaches_new_place {
                     continue;
                 }
-                let existing = by_alias(&self.cases, std::slice::from_ref(&hit.id)).and_then(|k| self.cases.get(&k));
-                // A known match is re-read only when it changed and could now need action (a fix, exploitation).
-                if prior.is_some() && !existing.is_some_and(|c| c.state == CaseState::Watch || (c.state == CaseState::Handled && !c.fix_available)) {
+                // A known match is re-read only when it changed and could now need action (a fix, exploitation), or reaches a new place.
+                if prior.is_some() && !reaches_new_place && !existing.is_some_and(|c| c.state == CaseState::Watch || (c.state == CaseState::Handled && !c.fix_available)) {
                     continue;
                 }
                 work.push(Work { hit: hit.clone(), family: family.clone(), baseline });
@@ -1452,6 +1495,7 @@ impl Cycle<'_, '_> {
             affected.extend(affected_of(&targets));
             affected.truncate(80);
             c.affected = Some(affected);
+            let new_places = c.unjudged_places(&places_of(&targets));
             c.places = merge_places(&c.places, &places_of(&targets));
             c.updated_at = at.clone();
             // Another database's record of the same CVE may rate it higher (PYSEC critical, GHSA high).
@@ -1461,6 +1505,10 @@ impl Cycle<'_, '_> {
             }
             if c.state == CaseState::Handled && !c.fix_available && !fixes.is_empty() {
                 reopen(c, &mut self.summary, &at, format!("fix released: {}; apply it and remove the temporary mitigation", fixes.join(", ")));
+            } else if c.state == CaseState::Handled && !new_places.is_empty() && c.status() == CaseStatus::Waiting {
+                // Judged once per place: the places judged before stand; only the new one is judged now.
+                let names = new_places.iter().map(short_place).collect::<Vec<_>>().join(", ");
+                raise(c, &mut self.summary, &at, format!("reaches a new place: {names}; the places judged before stand"));
             } else if c.state == CaseState::Watch && c.status() != CaseStatus::Closed {
                 let decision = package_decision(severity, !fixes.is_empty(), exploited, &targets, malicious);
                 if decision.state == CaseState::Pending {
@@ -1507,17 +1555,14 @@ impl Cycle<'_, '_> {
         self.open(c);
     }
 
-    /// Advisories waiting for their first response that share a place (a new deployment, the install baseline, a wave
-    /// of CVEs on one package): one case, and one response, for the place. The response judges every advisory in it,
-    /// so none is skipped, but the place is read once. Only what nobody has judged yet is grouped: a case already
-    /// handled or reopened keeps its own history.
+    /// Advisories waiting for their first response on the same place (a new deployment, the install baseline, a wave of
+    /// CVEs on one package): one case, and one response, per place. The response judges every advisory in it, so none
+    /// is skipped, but the place is read once. The bound is the place: only advisories that reach exactly the same
+    /// places are grouped (never chained through a shared one), so a run never covers more places than one of its
+    /// advisories already does, and at most `MAX_GROUPED` advisories. Only what nobody has judged yet is grouped: a
+    /// case already handled or reopened keeps its own history.
     fn group_by_place(&mut self) {
-        struct Group {
-            keys: Vec<String>,
-            places: HashSet<String>,
-            baseline: bool,
-        }
-        let mut groups: Vec<Group> = Vec::new();
+        let mut by_place: IndexMap<(bool, String), Vec<String>> = IndexMap::new();
         for c in self.cases.values() {
             let first_response = c.state == CaseState::Pending
                 && c.status() != CaseStatus::Closed
@@ -1530,23 +1575,18 @@ impl Cycle<'_, '_> {
             if !first_response || c.places.is_empty() {
                 continue;
             }
-            let places: HashSet<String> = c.places.iter().map(place_key).collect();
-            let baseline = c.baseline == Some(true);
-            // Every group it shares a place with joins it (and each other).
-            let mut joined = Group { keys: vec![c.key.clone()], places, baseline };
-            let mut rest: Vec<Group> = Vec::new();
-            for g in groups {
-                if g.baseline == baseline && !g.places.is_disjoint(&joined.places) {
-                    joined.keys.splice(0..0, g.keys);
-                    joined.places.extend(g.places);
-                } else {
-                    rest.push(g);
-                }
-            }
-            rest.push(joined);
-            groups = rest;
+            let mut keys: Vec<String> = c.places.iter().map(place_key).collect();
+            keys.sort();
+            by_place.entry((c.baseline == Some(true), keys.join(" + "))).or_default().push(c.key.clone());
         }
-        for Group { keys: mut group, places, .. } in groups {
+        let mut groups: Vec<(Vec<String>, String)> = Vec::new();
+        for ((_, place), keys) in by_place {
+            let weights: Vec<usize> = keys.iter().map(|k| self.cases[k.as_str()].advisories.as_ref().map_or(1, Vec::len)).collect();
+            for run in chunks_by_weight(&weights, MAX_GROUPED) {
+                groups.push((run.into_iter().map(|i| keys[i].clone()).collect(), place.clone()));
+            }
+        }
+        for (mut group, place) in groups {
             if group.len() < 2 {
                 continue;
             }
@@ -1558,10 +1598,8 @@ impl Cycle<'_, '_> {
             // A member that is itself a group brings the advisories it already grouped.
             let titles: Vec<String> =
                 group.iter().flat_map(|k| self.cases[k.as_str()].advisories.clone().unwrap_or_else(|| vec![self.cases[k.as_str()].title.clone()])).collect();
-            let mut place: Vec<String> = places.into_iter().collect();
-            place.sort();
             let more = if titles.len() > 3 { "; …" } else { "" };
-            let title = format!("{} vulnerabilities in {}: {}{more}", titles.len(), place.join(" + "), titles.iter().take(3).cloned().collect::<Vec<_>>().join("; "));
+            let title = format!("{} vulnerabilities in {place}: {}{more}", titles.len(), titles.iter().take(3).cloned().collect::<Vec<_>>().join("; "));
             let lead_key = group[0].clone();
             let mut rest: Vec<Case> = Vec::new();
             for key in &group[1..] {
@@ -3120,5 +3158,13 @@ mod tests {
         assert!(!node_released(&node_post("Tuesday, February 31, 2026 Security Releases", "2026-03-02T10:00:00Z")));
         assert!(node_released(&node_post("Friday, April 31, 2026 Security Releases", "2026-05-01T00:00:00Z")));
         assert!(!node_released(&node_post("Friday, January 32, 2026 Security Releases", "2026-12-01T00:00:00Z")));
+    }
+
+    #[test]
+    fn a_wave_on_one_place_is_split_into_runs_of_at_most_the_cap_in_order() {
+        assert_eq!(chunks_by_weight(&[1; 5], 2), [vec![0, 1], vec![2, 3], vec![4]]);
+        assert_eq!(chunks_by_weight(&[1, 3, 1, 1], 3), [vec![0], vec![1], vec![2, 3]], "a case that is already a group counts for its advisories");
+        assert_eq!(chunks_by_weight(&[5], 2), [vec![0]], "one heavier than the cap runs alone");
+        assert!(chunks_by_weight(&[], 2).is_empty());
     }
 }

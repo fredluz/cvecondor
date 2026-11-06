@@ -37,6 +37,9 @@ pub struct Judged {
     #[serde(default)]
     pub fix_available: bool,
     pub items: Vec<JudgedItem>,
+    /// Every place the case covered, as `host where`: a place beyond the capped item list was still judged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub places: Vec<String>,
 }
 
 /// What reaches a place from outside, as one comparable string: its public hostnames and ports, sorted.
@@ -70,7 +73,8 @@ impl Judged {
                 items.push(item);
             }
         }
-        Some(Self { at: at.to_string(), exploited: c.exploited == Some(true), fix_available: c.fix_available, items })
+        let places = c.places.iter().map(|p| format!("{} {}", p.host, p.r#where)).collect();
+        Some(Self { at: at.to_string(), exploited: c.exploited == Some(true), fix_available: c.fix_available, items, places })
     }
 
     /// Whether `c` still stands as judged: nothing material changed. Exploitation or a fix that was not there when
@@ -98,6 +102,11 @@ impl Judged {
             }
         }
         true
+    }
+
+    /// Whether the place was part of what was judged.
+    pub fn judged_place(&self, host: &str, place: &str) -> bool {
+        self.places.iter().any(|p| *p == format!("{host} {place}")) || self.items.iter().any(|i| i.host == host && i.r#where == place)
     }
 
     /// The judged items that are about the same package and place as `c`'s affected items.
