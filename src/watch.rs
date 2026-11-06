@@ -953,19 +953,35 @@ pub fn assess(input: &AssessInput) -> Assessment {
     rated(Rating::NotARealRisk, format!("{}: recorded only", input.severity.as_str()))
 }
 
+fn affected_item(item: &InventoryItem) -> Affected {
+    Affected {
+        host: item.host.clone(),
+        r#where: item.r#where.clone(),
+        name: item.name.clone(),
+        version: item.version.clone(),
+        running: (item.running == Some(false)).then_some(false),
+        dev: (item.dev == Some(true)).then_some(true),
+    }
+}
+
 fn affected_of(targets: &[Target]) -> Vec<Affected> {
-    targets
-        .iter()
-        .take(80)
-        .map(|t| Affected {
-            host: t.item.host.clone(),
-            r#where: t.item.r#where.clone(),
-            name: t.item.name.clone(),
-            version: t.item.version.clone(),
-            running: (t.item.running == Some(false)).then_some(false),
-            dev: (t.item.dev == Some(true)).then_some(true),
-        })
-        .collect()
+    targets.iter().take(80).map(|t| affected_item(&t.item)).collect()
+}
+
+/// The affected list brought to what matches the inventory now: wherever `matched` has a package in a place, its
+/// installed versions replace what the list held there, so a version that came or went is what a response sees and
+/// what is judged. Entries for other packages and places are kept.
+fn refresh_affected(affected: Option<Vec<Affected>>, matched: &[&InventoryItem]) -> Vec<Affected> {
+    let covered = |a: &Affected| matched.iter().any(|m| m.host == a.host && m.r#where == a.r#where && m.name == a.name);
+    let mut out: Vec<Affected> = affected.unwrap_or_default().into_iter().filter(|a| !covered(a)).collect();
+    for m in matched {
+        let a = affected_item(m);
+        if !out.contains(&a) {
+            out.push(a);
+        }
+    }
+    out.truncate(80);
+    out
 }
 
 fn places_of(targets: &[Target]) -> Vec<Place> {
@@ -1220,8 +1236,8 @@ struct Cycle<'a, 'b> {
     cases: IndexMap<String, Case>,
     known: Known,
     queue: Queue,
-    /// OSV ids matching the inventory this cycle, and the families asked (`reconcile` reads them).
-    matched: IndexSet<String>,
+    /// OSV ids matching the inventory this cycle, with the items each matched, and the families asked (`reconcile` reads them).
+    matched: IndexMap<String, Vec<InventoryItem>>,
     queried: IndexSet<String>,
 }
 
@@ -1246,7 +1262,7 @@ pub fn run_cycle(config: &Config, deps: &CycleDeps) -> Result<CycleSummary> {
         cases: read_cases(dir),
         known: read_state(dir, "known.json").unwrap_or_default(),
         queue: retry::read(dir),
-        matched: IndexSet::new(),
+        matched: IndexMap::new(),
         queried: IndexSet::new(),
     };
     let records: Mutex<IndexMap<String, OsvRecord>> = Mutex::new(read_state(dir, "osv-records.json").unwrap_or_default());
@@ -1426,7 +1442,7 @@ impl Cycle<'_, '_> {
             self.queried.insert(family.clone());
         }
         for hit in hits.values() {
-            self.matched.insert(hit.id.clone());
+            self.matched.insert(hit.id.clone(), hit.items.clone());
         }
         let mut work: Vec<Work> = Vec::new();
         for family in &due {
@@ -2372,11 +2388,17 @@ impl Cycle<'_, '_> {
                 continue;
             }
             let ids: Vec<&String> = c.osv_ids.iter().flatten().map(|(id, _)| id).chain(c.aliases.iter()).collect();
-            let still = ids.iter().any(|id| self.matched.contains(*id));
-            if still {
-                if c.reopenable()
+            let matched: Vec<InventoryItem> = ids.iter().filter_map(|id| self.matched.get(*id)).flatten().cloned().collect();
+            if !matched.is_empty() {
+                if (c.status() != CaseStatus::Closed || c.reopenable())
                     && let Some(c) = self.cases.get_mut(&key)
                 {
+                    // The advisory can come back at another installed version with its `modified` unchanged, which
+                    // `osv_phase` skips: what is installed and matched now is what a response sees and judges.
+                    let refs: Vec<&InventoryItem> = matched.iter().collect();
+                    c.affected = Some(refresh_affected(c.affected.take(), &refs));
+                }
+                if let Some(c) = self.cases.get_mut(&key).filter(|c| c.reopenable()) {
                     match_again(c, &mut self.summary, &at, inventory);
                 }
             } else if c.status() != CaseStatus::Closed

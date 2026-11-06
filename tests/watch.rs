@@ -1844,6 +1844,57 @@ fn an_advisory_reaching_a_new_place_is_judged_there_once() {
     assert!(c.judged.as_ref().is_some_and(|j| j.judged_place("github", "repo:acme/web") && j.judged_place("github", "repo:acme/api")), "{c:?}");
 }
 
+/// The fixture inventory with its left-pad replaced by `versions` (one item each, in the same repo) and a new collection time.
+fn inventory_left_pad_at(versions: &[&str], collected_at: &str) -> Inventory {
+    let mut v = serde_json::to_value(inventory()).expect("serializes");
+    let items = v["items"].as_array_mut().expect("items");
+    items.retain(|i| i["name"] != "left-pad");
+    for version in versions {
+        items.push(json!({ "host": "github", "where": "repo:acme/api", "kind": "package", "ecosystem": "npm", "name": "left-pad", "version": version, "path": format!("{version}/package-lock.json") }));
+    }
+    v["collectedAt"] = json!(collected_at);
+    serde_json::from_value(v).expect("an inventory")
+}
+
+/// A judged case closed as fixed (the advisory stopped matching), the advisory itself unchanged when it matches again.
+fn closed_then_matching_again(versions: &[&str]) -> Harness {
+    let h = Harness::new(Net::new("2026-10-20T00:00:00Z"), claude());
+    h.put_case(judged_case(json!({})));
+    h.net(gone_advisory_returns);
+    h.cycle(); // matches at 1.0.0: seen, the judgement stands
+    write_state(&h.config.state_dir, "inventory.json", &inventory_left_pad_at(&[], "2026-10-22T01:00:00.000Z")).expect("writes");
+    h.cycle(); // nothing matches any more: closed as fixed
+    let c = &h.cases()["CVE-2026-9000"];
+    assert_eq!((c.status(), c.status_reason()), (CaseStatus::Closed, Some(StatusReason::Fixed)), "{c:?}");
+    write_state(&h.config.state_dir, "inventory.json", &inventory_left_pad_at(versions, "2026-10-22T02:00:00.000Z")).expect("writes");
+    h
+}
+
+/// An advisory returning (its `modified` unchanged) at another installed version is judged at the version now installed.
+#[test]
+fn an_advisory_returning_at_another_version_is_judged_and_records_that_version() {
+    let h = closed_then_matching_again(&["2.0.0"]);
+    h.cycle();
+    let responded = h.responded();
+    assert_eq!(responded.len(), 1, "a version it was never judged at");
+    let judging = responded[0].0.judging.as_ref().expect("what the response saw");
+    let versions: Vec<&str> = judging.items.iter().map(|i| i.version.as_str()).collect();
+    assert_eq!(versions, ["2.0.0"], "the judged version is the installed one");
+}
+
+/// A vulnerable version that appears beside a judged one is a new install: it is judged, not covered by the old one.
+#[test]
+fn a_vulnerable_version_installed_beside_a_judged_one_is_judged_when_the_advisory_returns() {
+    let h = closed_then_matching_again(&["1.0.0", "2.0.0"]);
+    h.cycle();
+    let responded = h.responded();
+    assert_eq!(responded.len(), 1, "2.0.0 was never judged");
+    let judging = responded[0].0.judging.as_ref().expect("what the response saw");
+    let mut versions: Vec<&str> = judging.items.iter().map(|i| i.version.as_str()).collect();
+    versions.sort_unstable();
+    assert_eq!(versions, ["1.0.0", "2.0.0"]);
+}
+
 /// A run is bounded by its place: advisories are grouped when they reach exactly the same places, never chained
 /// through a place they share, so no run covers more than one of its advisories does.
 #[test]

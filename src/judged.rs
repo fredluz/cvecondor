@@ -79,7 +79,8 @@ impl Judged {
 
     /// Whether `c` still stands as judged: nothing material changed. Exploitation or a fix that was not there when
     /// it was judged, an item (or a place) the judgement never saw, an item no longer at the judged version, or a
-    /// place whose exposure changed all say no; an item gone from the inventory says nothing.
+    /// place whose exposure changed all say no; an item gone from the inventory says nothing. Each affected item is
+    /// held to its own version: another version of the package judged in the same place does not cover it.
     pub fn covers(&self, c: &Case, inventory: &Inventory) -> bool {
         if (c.exploited == Some(true) && !self.exploited) || (c.fix_available && !self.fix_available) {
             return false;
@@ -89,15 +90,17 @@ impl Judged {
             return false;
         }
         for a in affected {
-            let present: Vec<&str> =
-                inventory.items.iter().filter(|i| i.host == a.host && i.r#where == a.r#where && i.name == a.name).map(|i| i.version.as_str()).collect();
-            if present.is_empty() {
+            let mut present = inventory.items.iter().filter(|i| i.host == a.host && i.r#where == a.r#where && i.name == a.name).peekable();
+            if present.peek().is_none() {
                 continue;
             }
+            // Still installed at the version the case names, or it changed since.
+            if !present.any(|i| i.version == a.version) {
+                return false;
+            }
             let exposure = exposure_of(inventory, &a.host, &a.r#where);
-            let judged = |i: &&JudgedItem| i.host == a.host && i.r#where == a.r#where && i.name == a.name;
-            // The item must have been judged, at a version it still runs, with the exposure it has now.
-            if !self.items.iter().filter(judged).any(|j| present.contains(&j.version.as_str()) && j.exposure == exposure) {
+            // Judged at that version, with the exposure it has now.
+            if !self.items.iter().any(|j| same_item(a, &j.host, &j.r#where, &j.name) && j.version == a.version && j.exposure == exposure) {
                 return false;
             }
         }
@@ -176,5 +179,28 @@ mod tests {
         };
         assert!(!j.covers(&wider, &with_right_pad), "right-pad was never judged here");
         assert!(j.covers(&wider, &inv), "right-pad is not installed: nothing to judge");
+    }
+
+    fn inventory_at(versions: &[&str]) -> Inventory {
+        let items: Vec<_> = versions
+            .iter()
+            .map(|v| json!({ "host": "web1", "where": "container:api", "kind": "package", "ecosystem": "npm", "name": "left-pad", "version": v }))
+            .collect();
+        serde_json::from_value(json!({ "collectedAt": "2026-10-21T06:00:00Z", "sources": {}, "items": items, "services": [] })).expect("an inventory")
+    }
+
+    fn affected_at(versions: &[&str]) -> Case {
+        let affected: Vec<_> = versions.iter().map(|v| json!({ "host": "web1", "where": "container:api", "name": "left-pad", "version": v })).collect();
+        case(json!({ "affected": affected }))
+    }
+
+    #[test]
+    fn a_vulnerable_version_installed_beside_a_judged_one_is_judged() {
+        let j = judged_at(&inventory_at(&["1.0.0"]), &affected_at(&["1.0.0"]));
+        let both = inventory_at(&["1.0.0", "2.0.0"]);
+        assert!(!j.covers(&affected_at(&["1.0.0", "2.0.0"]), &both), "2.0.0 was never judged here");
+        assert!(j.covers(&affected_at(&["1.0.0"]), &both), "a copy the case does not name changes nothing");
+        let wider = judged_at(&both, &affected_at(&["1.0.0", "2.0.0"]));
+        assert!(wider.covers(&affected_at(&["1.0.0", "2.0.0"]), &both), "both judged");
     }
 }
