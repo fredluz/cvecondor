@@ -265,6 +265,21 @@ pub struct Case {
     pub status_detail: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status_at: Option<String>,
+    /// What `waiting: service` is covering for: set on the way in, cleared when the service is back. `None`
+    /// there means a state file from before this field — the old behaviour: it reopens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_prior: Option<ServicePrior>,
+}
+
+/// The lifecycle a `waiting` case was in when its service went down: `service_phase` keeps it, and when the
+/// service comes back the case returns to it instead of reopening (`None`: it had none — then it reopens).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServicePrior {
+    pub status: CaseStatus,
+    pub reason: StatusReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 impl Case {
@@ -341,6 +356,7 @@ pub fn settle(c: &mut Case, status: CaseStatus, reason: Option<StatusReason>, de
 
 /// Back to open: the reason and detail go, the case needs the responder or the user again.
 fn mark_open(c: &mut Case, at: &str) {
+    c.service_prior = None; // back to work: no remembered wait survives the reset
     settle(c, CaseStatus::Open, None, String::new(), at);
 }
 
@@ -607,8 +623,10 @@ pub fn merge_responses(dir: &Path, cases: &mut IndexMap<String, Case>, at: &str)
                 }
             }
         }
-        // The outcome settles the case; a failed run and a case the user already closed keep theirs.
+        // The outcome settles the case; a failed run and a case the user already closed keep theirs. A fresh
+        // settle supersedes any wait a service hold remembered: a stale `service_prior` never comes back.
         if record.state == ResponseState::Done && c.status() != CaseStatus::Closed {
+            c.service_prior = None;
             let (status, reason, detail) = match &c.triage {
                 Some(triage) => settled(triage, c.pull_requests.as_deref().unwrap_or_default()),
                 None if !c.pull_requests.as_deref().unwrap_or_default().is_empty() => {
@@ -973,6 +991,7 @@ fn new_case(key: String, kind: CaseKind, title: String, state: CaseState, reason
         service: None,
         status_detail: None,
         status_at: None,
+        service_prior: None,
     };
     migrate_case(&mut c);
     c
@@ -1033,9 +1052,9 @@ fn case_service(c: &Case, states: &IndexMap<String, crate::service::Resolution>)
     if seen && all_down { Some(ServiceState::Down) } else if all_down { None } else { Some(ServiceState::Running) }
 }
 
-/// Re-reads each case's service and keeps `waiting: service` current: a down service waits
-/// on the service (overriding other waits, and a run that never finished), a service back
-/// reopens its cases so the responder picks them up again.
+/// Re-reads each case's service and keeps `waiting: service` current: a down service waits on the service
+/// (its real wait kept in `service_prior`), a service back returns it to that wait — it reopens only when
+/// there was nothing to return to (it was open, or its run never finished).
 pub fn service_phase(config: &Config, inventory: &Inventory, cases: &mut IndexMap<String, Case>, summary: &mut CycleSummary, at: &str, now: Timestamp) {
     let states = service_states(config, inventory, now);
     for c in cases.values_mut() {
@@ -1043,17 +1062,33 @@ pub fn service_phase(config: &Config, inventory: &Inventory, cases: &mut IndexMa
         c.service = resolution;
         match (c.status(), resolution) {
             (CaseStatus::Waiting, Some(state)) if state.is_down() => {
+                // Entering (not re-stamping): keep what it waits on so a service back returns it there
+                // untouched. A wait that is already `service` (a shutdown) records nothing: there is
+                // nowhere to return, so it reopens when the service is back.
+                if c.status_reason() != Some(StatusReason::Service) {
+                    c.service_prior = Some(ServicePrior {
+                        status: c.status(),
+                        reason: c.status_reason().unwrap_or(StatusReason::Watching),
+                        detail: c.status_detail.clone().filter(|d| !d.is_empty()),
+                    });
+                }
                 settle(c, CaseStatus::Waiting, Some(StatusReason::Service), "the service to come back", at);
             }
             (CaseStatus::Waiting, _) if c.status_reason() == Some(StatusReason::Service) => {
-                // Back (or no longer provable as down): the responder picks it up again.
-                c.state = CaseState::Pending;
-                c.reason = "its service is back".to_string();
-                c.reopened_at = Some(at.to_string());
-                c.previous_report = c.report.clone().or_else(|| c.previous_report.take());
-                c.updated_at = at.to_string();
-                mark_open(c, at);
-                summary.reopened.push(c.key.clone());
+                if let Some(prior) = c.service_prior.take() {
+                    // It had somewhere to wait before: it goes back there, nothing for the responder.
+                    settle(c, prior.status, Some(prior.reason), prior.detail.unwrap_or_else(|| prior.reason.default_detail().to_string()), at);
+                } else {
+                    // Back (or no longer provable as down) with nothing recorded to return to: the responder
+                    // picks it up again (it was open, or its run never finished).
+                    c.state = CaseState::Pending;
+                    c.reason = "its service is back".to_string();
+                    c.reopened_at = Some(at.to_string());
+                    c.previous_report = c.report.clone().or_else(|| c.previous_report.take());
+                    c.updated_at = at.to_string();
+                    mark_open(c, at);
+                    summary.reopened.push(c.key.clone());
+                }
             }
             _ => {}
         }

@@ -1311,10 +1311,10 @@ fn api_running() -> Value {
     ])
 }
 
-/// A case with an open fix pull request whose service is down waits on the service, not on the merge;
-/// a service that comes back puts the case back in front of the responder.
+/// A case with an open fix pull request whose service is down waits on the service, not on the merge; the
+/// service coming back puts the case back on the wait it had — nothing is dispatched, nothing pings.
 #[test]
-fn a_case_waits_on_a_down_service_and_reopens_when_it_is_back() {
+fn a_case_waits_on_a_down_service_and_returns_to_its_wait_when_it_is_back() {
     let net = Net::new("2026-10-20T00:00:00Z");
     // Written before the config is built, so the collector's file is where the collector looks.
     let dir = common::TempDir::new("cvecondor-test");
@@ -1340,15 +1340,52 @@ fn a_case_waits_on_a_down_service_and_reopens_when_it_is_back() {
     assert_eq!((c.status(), c.status_reason()), (CaseStatus::Waiting, Some(StatusReason::Service)), "{c:?}");
     assert_eq!(c.service, Some(cvecondor::service::ServiceState::Down), "{c:?}");
     assert_eq!(c.status_detail(), "the service to come back");
+    assert_eq!(
+        c.service_prior.as_ref().map(|p| (p.status, p.reason)),
+        Some((CaseStatus::Waiting, StatusReason::User)),
+        "the wait it covers for: {c:?}"
+    );
     assert!(c.pull_requests.as_deref().is_some_and(|prs| prs.len() == 1), "the open PR stays on the case: {c:?}");
 
-    // The service comes back: the case reopens for the responder this same cycle.
+    // The service comes back: the case returns to its merge wait — no dispatch, no urgent line.
     std::fs::write(&file, json!({ "generatedAt": "2026-10-21T08:12:00Z", "containers": api_running() }).to_string()).expect("writes the state file");
+    h.cycle();
+    let c = &h.cases()["CVE-2026-9"];
+    assert_eq!(c.status(), CaseStatus::Waiting, "{c:?}");
+    assert_eq!(c.status_reason(), Some(StatusReason::User), "{c:?}");
+    assert!(c.service_prior.is_none(), "the remembered wait is spent: {c:?}");
+    assert_eq!(c.service, Some(cvecondor::service::ServiceState::Running), "{c:?}");
+    assert_eq!(h.responded().len(), 0, "a service back restores the wait; it does not re-dispatch");
+}
+
+/// A `waiting: service` case with nothing recorded underneath — it was open when its service went down, or
+/// a state file from before `service_prior` — reopens when the service is back: the responder picks it up.
+#[test]
+fn a_down_service_reopens_only_a_case_that_had_no_wait_to_return_to() {
+    let dir = common::TempDir::new("cvecondor-test");
+    let file = dir.path().join("service-state.json");
+    std::fs::write(&file, json!({ "generatedAt": "2026-10-21T08:12:00Z", "containers": api_running() }).to_string()).expect("writes the state file");
+    let mut extra = state_config(&file);
+    extra.as_object_mut().expect("an object").extend(claude().as_object().expect("an object").clone());
+    let config = test_config(extra);
+    write_state(&config.state_dir, "inventory.json", &inventory()).expect("writes the inventory");
+    let h = Harness {
+        config, net: shared(Net::new("2026-10-20T00:00:00Z")), rec: recorder(), responded: Arc::default(), runs: Arc::default(),
+        clock: AtomicI64::new(parse_time("2026-10-21T08:12:00Z").expect("a time").as_millisecond()),
+    };
+    // The case shows `waiting: service` with no prior wait recorded — it was open when its service went
+    // down, or a state file from before `servicePrior` — and the file now says it runs. A cycle sees a
+    // `waiting: service` case whose service is back and nothing to return to: it reopens, dispatched now.
+    h.put_case(api_case(json!({
+        "state": "handled", "handledBy": "responder", "handledAt": "2026-10-20T10:00:00Z",
+        "status": "waiting", "statusReason": "service", "service": "down",
+        "targets": ["github repo:acme/api left-pad 1.0.0 (package-lock.json)"]
+    })));
     h.cycle();
     let c = &h.cases()["CVE-2026-9"];
     assert_eq!(c.status(), CaseStatus::Open, "{c:?}");
     assert_eq!(c.service, Some(cvecondor::service::ServiceState::Running), "{c:?}");
-    assert_eq!(h.responded().len(), 1, "a service back re-dispatches the case");
+    assert_eq!(h.responded().len(), 1, "with no settled wait it re-dispatches the case");
     assert!(matches(r"service is back", &c.reason), "{c:?}");
 }
 
