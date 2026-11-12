@@ -28,6 +28,7 @@ pub mod state;
 pub mod telegram;
 pub mod types;
 pub mod upstream;
+pub mod usage;
 pub mod util;
 pub mod vendors;
 pub mod versions;

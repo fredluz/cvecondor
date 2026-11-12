@@ -168,9 +168,11 @@ Three agents have presets (`"agent": "claude" | "codex" | "omp"`), with a tighte
 
 | Agent | `propose` | `update` and `act` |
 |---|---|---|
-| claude | `claude -p --output-format text --permission-mode acceptEdits --allowedTools Read,Grep,Glob,Write,Edit,WebFetch,WebSearch,Task --disallowedTools ScheduleWakeup,Monitor,CronCreate` (plus `Bash(<cmd>:*)` for each `responder.reach` command) | `claude -p --output-format text --dangerously-skip-permissions --disallowedTools ScheduleWakeup,Monitor,CronCreate` |
-| codex | `codex exec --sandbox workspace-write --skip-git-repo-check -` | `codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check -` |
+| claude | `claude -p --output-format json --permission-mode acceptEdits --allowedTools Read,Grep,Glob,Write,Edit,WebFetch,WebSearch,Task --disallowedTools ScheduleWakeup,Monitor,CronCreate` (plus `Bash(<cmd>:*)` for each `responder.reach` command) | `claude -p --output-format json --dangerously-skip-permissions --disallowedTools ScheduleWakeup,Monitor,CronCreate` |
+| codex | `codex exec --sandbox workspace-write --skip-git-repo-check --json -o {workdir}/last-message.md -` | `codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --json -o {workdir}/last-message.md -` |
 | omp | `omp -p --no-session --tools read,grep,glob,write,edit,task,web_search @{prompt}` | `omp -p --no-session @{prompt}` |
+
+The claude and codex presets print structured output (`--output-format json`, `--json`) that CVECondor unwraps back to the plain answer, to count the run's tokens (`responder.usage`, README). A custom `command` keeps printing what it printed, and its usage is unknown unless you set `usage`.
 
 `update` and `act` run with the CLI's full access as the user CVECondor runs as, which is why that user's access is what bounds it (step 1).
 

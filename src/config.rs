@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::name::{ENV_PREFIX, NAME};
+use crate::usage::Format;
 use crate::vendors::catalog::{VendorFeed, VendorFeedKind};
 
 /// The process environment, passed explicitly so tests can pass their own.
@@ -304,6 +305,8 @@ pub struct ResponderConfig {
     pub update_except: Vec<String>,
     pub max_per_cycle: f64,
     pub timeout_minutes: f64,
+    /// How a run's stdout is read for the agent's token usage: the preset's own format, `none` (unknown) for a custom command.
+    pub usage: crate::usage::Format,
     pub cwd: Option<PathBuf>,
     pub env: IndexMap<String, String>,
     /// Shell commands the responder runs itself to put an urgent line in front of the user (the line on stdin), besides
@@ -978,6 +981,24 @@ pub fn build_config(raw: &Value, file: &Path, env: &Env) -> Result<Config> {
             Some(Agent::Claude) => ResponderCommand { propose: crate::responder::allow_reach(&command.propose, &reach), ..command },
             _ => command,
         };
+        let implicit = match preset {
+            Some(Agent::Claude) => Format::ClaudeJson,
+            Some(Agent::Codex) => Format::CodexJsonl,
+            _ => Format::None,
+        };
+        let usage = if present(r, "usage").is_some() {
+            let chosen = Format::parse(one_of(r, "usage", "responder", &["claude-json", "codex-jsonl", "none"], None)?).unwrap_or_default();
+            if preset.is_some() && chosen != implicit {
+                bail!(
+                    "responder.usage: the \"{}\" preset's output is read as {}; to read it differently, set \"command\" too",
+                    agent.as_deref().unwrap_or(""),
+                    implicit.as_str()
+                );
+            }
+            chosen
+        } else {
+            implicit
+        };
         responder = Some(ResponderConfig {
             agent,
             command,
@@ -988,6 +1009,7 @@ pub fn build_config(raw: &Value, file: &Path, env: &Env) -> Result<Config> {
             update_except: strs_of(r, "updateExcept", "responder", &[])?,
             max_per_cycle: num_of(r, "maxPerCycle", "responder", 2.0)?,
             timeout_minutes: num_of(r, "timeoutMinutes", "responder", 60.0)?,
+            usage,
             cwd: opt_str(r, "cwd", "responder")?.map(|cwd| path(&cwd)),
             env: record_of(r, "env", "responder")?,
             reach,
@@ -1314,6 +1336,31 @@ mod tests {
         assert_eq!(test.expect_err("test is not accepted").to_string(), "notify[0].events: 'test' is not urgent, case, report, secrets");
         let NotifierKind::Email { security, to, port, .. } = &config.notify[1].kind else { panic!("email") };
         assert_eq!((*security, to.as_slice(), *port), (EmailSecurity::Tls, &["me@example.com".to_string()][..], 465));
+    }
+
+    #[test]
+    fn usage_is_the_presets_format_none_for_a_custom_command_and_validated() {
+        let usage = |responder: Value| {
+            build(json!({ "collectors": [{ "type": "host" }], "responder": responder }), &env(&[]))
+                .map(|c| c.responder.expect("responder").usage)
+                .map_err(|e| e.to_string())
+        };
+        assert_eq!(usage(json!({ "agent": "claude" })), Ok(Format::ClaudeJson));
+        assert_eq!(usage(json!({ "agent": "codex" })), Ok(Format::CodexJsonl));
+        assert_eq!(usage(json!({ "agent": "omp" })), Ok(Format::None));
+        assert_eq!(usage(json!({ "command": ["my-agent"] })), Ok(Format::None), "a custom command is not read unless it says how");
+        assert_eq!(usage(json!({ "agent": "claude", "command": ["my-agent"] })), Ok(Format::None), "`agent` is only a label next to a command");
+        assert_eq!(usage(json!({ "command": ["my-agent"], "usage": "codex-jsonl" })), Ok(Format::CodexJsonl));
+        assert_eq!(usage(json!({ "command": ["my-agent"], "usage": "none" })), Ok(Format::None));
+        assert_eq!(usage(json!({ "agent": "claude", "usage": "claude-json" })), Ok(Format::ClaudeJson));
+        assert_eq!(
+            usage(json!({ "command": ["my-agent"], "usage": "gemini" })),
+            Err("responder.usage: expected one of claude-json, codex-jsonl, none".to_string())
+        );
+        assert_eq!(
+            usage(json!({ "agent": "claude", "usage": "none" })),
+            Err("responder.usage: the \"claude\" preset's output is read as claude-json; to read it differently, set \"command\" too".to_string())
+        );
     }
 
     #[test]

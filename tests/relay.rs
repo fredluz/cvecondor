@@ -485,3 +485,32 @@ fn a_text_message_is_still_answered_next_to_an_unreadable_one() {
     assert!(sent[0]["text"].as_str().unwrap_or("").contains("got a sticker"));
     assert_eq!(sent[1]["text"].as_str(), Some("answer to hello"));
 }
+
+#[test]
+fn a_claude_json_answer_is_unwrapped_for_the_reply_and_the_run_is_counted() {
+    let dir = TempDir::new("cvecondor-relay");
+    let json_out = r#"{"type":"result","is_error":false,"result":"Closed it.","total_cost_usd":0.5,"modelUsage":{"claude-haiku-5-5":{"inputTokens":100,"outputTokens":7,"cacheReadInputTokens":900,"cacheCreationInputTokens":0,"costUSD":0.5}}}"#;
+    let env: Env = [("BOT".to_string(), TOKEN.to_string()), ("PATH".to_string(), std::env::var("PATH").unwrap_or_default())].into();
+    let raw = json!({
+        "stateDir": dir.path(),
+        "collectors": [{ "type": "host" }],
+        "responder": { "command": ["sh", "-c", format!("printf '%s' '{json_out}'")], "usage": "claude-json" },
+        "notify": [{ "type": "telegram", "botToken": "${BOT}", "chatId": 42, "replies": true }],
+    });
+    std::fs::write(dir.path().join(format!("relay-{}.json", &sha256_hex(TOKEN.as_bytes())[..8])), r#"{ "offset": 10 }"#).expect("writes the offset");
+    let config = build_config(&raw, &dir.path().join("config.json"), &env).expect("builds");
+    let telegram = Telegram::new(vec![json!([text(1, 3, 42, "close it")])]);
+    let fetch = |req: Request| telegram.fetch(req);
+    let log = |_: &str| {};
+    let options = PollOptions { env: Some(&env), log: Some(&log), ..PollOptions::default() };
+
+    assert_eq!(poll_once(&config, notifier(&config), &fetch, &run_job, &|| now(), &options).expect("polls"), 1);
+
+    assert_eq!(telegram.sent()[0]["text"].as_str(), Some("Closed it."), "the answer is the unwrapped text, not the JSON");
+    let records = cvecondor::usage::read(dir.path());
+    assert_eq!(records.len(), 1);
+    let (record, usage) = (&records[0], &records[0].usage);
+    assert_eq!((record.component, record.key.as_deref(), record.mode.as_str()), (cvecondor::usage::Component::Relay, None, "act"));
+    assert_eq!((usage.input, usage.cache_read, usage.output, usage.cost_usd), (Some(1000), Some(900), Some(7), Some(0.5)));
+    assert!(!std::fs::read_to_string(dir.path().join("usage.jsonl")).expect("exists").contains("Closed it"), "no reply text in the counter");
+}

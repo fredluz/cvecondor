@@ -585,3 +585,73 @@ fn a_run_reads_each_repos_visibility_from_github_and_tells_the_responder_unknown
     assert!(!none.contains("\n## What you may write into each repo\n"));
     assert!(!none.contains("cvecondor/<case>"), "a branch is named for the package and version, never the case");
 }
+
+/// What `claude -p --output-format json` prints (the shape of tests/fixtures/usage/claude-json.json), with `## Message` as its answer.
+const CLAUDE_JSON_OUT: &str = r###"{"type":"result","subtype":"success","is_error":false,"result":"## Message\nPinned left-pad; the secret answer text.\n","total_cost_usd":0.0035877,"usage":{"input_tokens":2,"output_tokens":4},"modelUsage":{"claude-haiku-5-5":{"inputTokens":1176,"outputTokens":20,"cacheReadInputTokens":21770,"cacheCreationInputTokens":16212,"costUSD":0.0035877}}}"###;
+
+fn run_once(dir: &TempDir, responder: serde_json::Value, key: &str) -> (std::path::PathBuf, Vec<Notice>) {
+    let env: Env = [("GITHUB_TOKEN".to_string(), "ghp_unused".to_string())].into();
+    let config = config_in(dir, responder, &env);
+    let report = dir.path().join("reports").join("r.md");
+    let c = case(key, "pending", &report);
+    let case_file = dir.path().join("case.json");
+    fs::write(&case_file, "{}").expect("writes the case");
+    let rec = recorder();
+    start_response_with(&config, &c, &case_file, Mode::Propose, rec.notifier(), &StartOptions { env: Some(&env), ..StartOptions::default() }).expect("starts");
+    wait_running();
+    (report, rec.notices())
+}
+
+#[test]
+fn a_claude_json_run_is_unwrapped_for_the_report_and_its_counts_are_kept_without_any_text() {
+    let dir = TempDir::new("cvecondor-responder");
+    let agent = dir.path().join("fake-agent.sh");
+    fs::write(&agent, format!("printf '%s' '{CLAUDE_JSON_OUT}'\n")).expect("writes the agent");
+    let (report, notices) = run_once(&dir, json!({ "command": ["sh", agent], "usage": "claude-json" }), "CVE-2026-7");
+
+    // The report fallback got `.result`, not the JSON; a run with no report.md is still unfinished, as with `--output-format text`.
+    let saved = fs::read_to_string(&report).expect("the report is saved");
+    assert_eq!(saved, "## Message\nPinned left-pad; the secret answer text.\n\n");
+    let record: ResponseRecord = read_state(dir.path(), "responses/cve-2026-7.json").expect("the response is recorded");
+    assert_eq!(record.state, ResponseState::Failed);
+    assert_eq!(
+        record.error.as_deref(),
+        Some("ended without writing report.md: Pinned left-pad; the secret answer text."),
+        "the retry queue reads the answer, not JSON"
+    );
+    assert!(notices.last().expect("a final notice").text.contains("Pinned left-pad"));
+
+    let raw = fs::read_to_string(dir.path().join("usage.jsonl")).expect("usage.jsonl is written");
+    assert_eq!(raw.lines().count(), 1, "{raw}");
+    assert!(!raw.contains("secret answer") && !raw.contains("Pinned"), "counts only, never the text: {raw}");
+    let line: serde_json::Value = serde_json::from_str(raw.trim()).expect("one JSON line");
+    assert_eq!(
+        (line["component"].as_str(), line["key"].as_str(), line["cli"].as_str(), line["mode"].as_str()),
+        (Some("responder"), Some("CVE-2026-7"), Some("sh"), Some("propose"))
+    );
+    assert!(line["at"].as_str().is_some_and(|at| at.ends_with('Z')));
+    assert_eq!(
+        line["usage"],
+        json!({
+            "source": "claude-json", "input": 39158, "output": 20, "cacheRead": 21770, "cacheWrite": 16212, "costUsd": 0.0035877,
+            "models": ["claude-haiku-5-5"], "subagents": true
+        })
+    );
+    assert_eq!(serde_json::to_value(record.usage).expect("serializes"), line["usage"], "the response record carries the same usage");
+}
+
+#[test]
+fn a_custom_command_without_a_usage_setting_is_left_as_it_is_and_its_usage_is_unknown() {
+    let dir = TempDir::new("cvecondor-responder");
+    let agent = dir.path().join("fake-agent.sh");
+    // Prints claude's JSON shape, but nobody said to read it: it is the answer, as before.
+    fs::write(&agent, format!("printf '%s' '{CLAUDE_JSON_OUT}'\n")).expect("writes the agent");
+    let (report, _) = run_once(&dir, json!({ "command": ["sh", agent] }), "CVE-2026-8");
+
+    let saved = fs::read_to_string(&report).expect("the report is saved");
+    assert!(saved.starts_with(r#"{"type":"result""#), "stdout is used as it is: {saved}");
+    let raw = fs::read_to_string(dir.path().join("usage.jsonl")).expect("a run is recorded even when unknown");
+    let line: serde_json::Value = serde_json::from_str(raw.trim()).expect("one JSON line");
+    assert_eq!(line["usage"], json!({ "source": "unknown" }), "no number is invented");
+    assert!(!raw.contains("39158") && !raw.contains("0.0035877"), "{raw}");
+}

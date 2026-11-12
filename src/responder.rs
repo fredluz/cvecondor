@@ -33,12 +33,16 @@ use crate::notify::{Notice, Notifier};
 use crate::retry::{NO_REPORT, REPORT_INCOMPLETE, UNFINISHED_SAYS};
 use crate::state::{read_state, slug, write_file_atomic, write_state};
 use crate::upstream::parse_fixed;
+use crate::usage;
 use crate::util::{self, iso};
 use crate::visibility::{RepoVisibility, brief_section, visibilities};
 use crate::watch::{Case, ResponseRecord, ResponseState, Triage, TriagePath, final_rating, read_responses};
 
 /// Claude Code tools that keep a headless run open after its work is done (scheduled wake-ups, monitors, cron jobs).
 const CLAUDE_NO_WAITS: &str = "ScheduleWakeup,Monitor,CronCreate";
+
+/// Codex's `-o` value: its last message goes in the work dir, where `usage::unwrap` reads it.
+const CODEX_LAST_MESSAGE_ARG: &str = "{workdir}/last-message.md";
 
 /// Starting points per CLI and mode. `propose`: read, research, delegate to
 /// subagents, write only inside the scratch dir (its clones, report.md, outbox/);
@@ -48,8 +52,9 @@ const CLAUDE_NO_WAITS: &str = "ScheduleWakeup,Monitor,CronCreate";
 /// a run that schedules a wake-up stays open long after its report.
 pub static PRESETS: LazyLock<HashMap<(Agent, Mode), Vec<String>>> = LazyLock::new(|| {
     let argv = |parts: &[&str]| -> Vec<String> { parts.iter().map(|s| (*s).to_string()).collect() };
-    let full_claude = argv(&["claude", "-p", "--output-format", "text", "--dangerously-skip-permissions", "--disallowedTools", CLAUDE_NO_WAITS]);
-    let full_codex = argv(&["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check", "-"]);
+    let full_claude = argv(&["claude", "-p", "--output-format", "json", "--dangerously-skip-permissions", "--disallowedTools", CLAUDE_NO_WAITS]);
+    let full_codex =
+        argv(&["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check", "--json", "-o", CODEX_LAST_MESSAGE_ARG, "-"]);
     let full_omp = argv(&["omp", "-p", "--no-session", "@{prompt}"]);
     HashMap::from([
         (
@@ -58,7 +63,7 @@ pub static PRESETS: LazyLock<HashMap<(Agent, Mode), Vec<String>>> = LazyLock::ne
                 "claude",
                 "-p",
                 "--output-format",
-                "text",
+                "json",
                 "--permission-mode",
                 "acceptEdits",
                 "--allowedTools",
@@ -69,7 +74,10 @@ pub static PRESETS: LazyLock<HashMap<(Agent, Mode), Vec<String>>> = LazyLock::ne
         ),
         ((Agent::Claude, Mode::Update), full_claude.clone()),
         ((Agent::Claude, Mode::Act), full_claude),
-        ((Agent::Codex, Mode::Propose), argv(&["codex", "exec", "--sandbox", "workspace-write", "--skip-git-repo-check", "-"])),
+        (
+            (Agent::Codex, Mode::Propose),
+            argv(&["codex", "exec", "--sandbox", "workspace-write", "--skip-git-repo-check", "--json", "-o", CODEX_LAST_MESSAGE_ARG, "-"]),
+        ),
         ((Agent::Codex, Mode::Update), full_codex.clone()),
         ((Agent::Codex, Mode::Act), full_codex),
         ((Agent::Omp, Mode::Propose), argv(&["omp", "-p", "--no-session", "--tools", "read,grep,glob,write,edit,task,web_search", "@{prompt}"])),
@@ -699,6 +707,7 @@ pub fn start_response_with(config: &Config, c: &Case, case_file: &Path, mode: Mo
         error: None,
         pid: None,
         urgent: earlier.clone(),
+        usage: None,
     };
     write_state(&config.state_dir, &record_name, &record)?;
 
@@ -720,6 +729,7 @@ pub fn start_response_with(config: &Config, c: &Case, case_file: &Path, mode: Mo
         earlier,
         workdir,
         argv,
+        mode,
         report_idle: options.report_idle.unwrap_or(REPORT_IDLE),
         env,
         cwd: r.cwd.clone(),
@@ -757,6 +767,7 @@ struct Job {
     workdir: PathBuf,
     report_idle: Duration,
     argv: Vec<String>,
+    mode: Mode,
     env: Vec<(String, String)>,
     cwd: Option<PathBuf>,
     input: Vec<u8>,
@@ -768,6 +779,7 @@ struct Job {
 impl Job {
     fn run(&self, spawned: &mpsc::Sender<()>) -> Result<()> {
         let (config, c, workdir) = (&self.config, &self.case, &self.workdir);
+        let r = config.responder.as_ref().ok_or_else(|| anyhow!("no responder configured"))?;
         let mut record = self.record.clone();
         let told = Mutex::new(self.earlier.clone());
         let (stop_tx, stop_rx) = mpsc::channel::<()>();
@@ -808,7 +820,9 @@ impl Job {
         relay_outbox(config, c, workdir, &self.notify, &told);
         let told = told.into_inner().unwrap_or_else(PoisonError::into_inner);
 
-        let stdout = String::from_utf8_lossy(&ran.stdout).into_owned();
+        // The agent's stdout as the answer text it was before usage was read out of it.
+        let unwrapped = usage::unwrap(r.usage, &String::from_utf8_lossy(&ran.stdout), workdir);
+        let stdout = unwrapped.text;
         let written = fs::read(workdir.join("report.md")).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
         let exit = code.map_or_else(|| "null".to_string(), |n| n.to_string());
         let has_report = !written.trim().is_empty() || !stdout.trim().is_empty();
@@ -844,7 +858,11 @@ impl Job {
         }
         record.urgent = told.clone();
         record.pid = None;
+        record.usage = Some(unwrapped.usage.clone());
         write_state(&config.state_dir, &self.record_name, &record)?;
+        if !ran.unstarted {
+            usage::note(&config.state_dir, usage::Component::Responder, Some(&c.key), &cli_label(r), self.mode.as_str(), unwrapped.usage);
+        }
 
         let message = message_of(&report);
         // The brief says to send "exploitable now" at once; if the agent rated it act today but sent nothing, the one line goes out here.
@@ -876,6 +894,12 @@ impl Job {
         let _ = fs::remove_dir_all(workdir.join("repos"));
         Ok(())
     }
+}
+
+/// The CLI a usage record names: the preset, else the command's program.
+pub fn cli_label(r: &crate::config::ResponderConfig) -> String {
+    let program = r.command.for_mode(Mode::Act).first().map(|p| p.rsplit('/').next().unwrap_or(p));
+    r.agent.as_deref().or(program).unwrap_or("").to_string()
 }
 
 /// Why a finished-looking run is not finished, or `None` when its report is: `report.md` holds a `## Message` section
@@ -1008,6 +1032,7 @@ mod tests {
             error: None,
             pid: Some(u32::MAX - 1),
             urgent: Vec::new(),
+            usage: None,
         };
         write_state(&dir, "responses/cve-1.json", &running).expect("writes");
         write_state(&dir, "responses/cve-2.json", &ResponseRecord { key: "CVE-2".into(), state: ResponseState::Done, ..running.clone() }).expect("writes");
