@@ -56,6 +56,7 @@ Usage: {NAME} <command> [--config FILE]
   cycle               one cycle now (refreshes a stale inventory first); waits for responders
   inventory [--out F] refresh the inventory now (all collectors, read-only)
   baseline [--out F]  what is vulnerable or exposed today: critical/high per place, secrets, vendors
+  dashboard [--out F] the same, as one static HTML page (stdout, or F, mode 0600); read-only, no server
   status [--closed]   last cycle, sources, collectors, cases (open and waiting, closed with --closed), unread inbox
   inbox [--all] [--peek]
                       what the watcher kept for you since you last read it (everything not urgent), then marks it read
@@ -481,7 +482,7 @@ fn round(x: f64) -> i64 {
     (x + 0.5).floor() as i64
 }
 
-fn ago(at: Option<&str>) -> String {
+pub(crate) fn ago(at: Option<&str>) -> String {
     let Some(at) = at.filter(|a| !a.is_empty()) else { return "never".to_string() };
     let Some(then) = parse_time(at) else { return "never".to_string() };
     let minutes = round((util::now().as_millisecond() - then.as_millisecond()) as f64 / 60_000.0);
@@ -497,27 +498,79 @@ fn ago(at: Option<&str>) -> String {
 }
 
 /// The first `n` characters.
-fn clip(text: &str, n: usize) -> String {
+pub(crate) fn clip(text: &str, n: usize) -> String {
     text.chars().take(n).collect()
 }
 
-fn status(config: &Config, show_closed: bool) -> Result<String> {
-    let dir = &config.state_dir;
-    let feeds: IndexMap<String, FeedState> = read_state(dir, "feeds.json").unwrap_or_default();
-    let inventory: Option<Inventory> = read_state(dir, "inventory.json");
-    let last: Option<CycleSummary> = read_state(dir, "last-cycle.json");
-    let cases: Vec<Case> = read_cases(dir).into_values().collect();
-    let errors: Vec<(&String, &FeedState)> = feeds.iter().filter(|(_, f)| f.error.as_deref().is_some_and(|e| !e.is_empty())).collect();
-    let by_status = |status: CaseStatus| {
-        let mut list: Vec<&Case> = cases.iter().filter(|c| c.status() == status).collect();
+/// What `status` and `dashboard` both read from the state dir.
+pub(crate) struct Overview {
+    pub feeds: IndexMap<String, FeedState>,
+    pub inventory: Option<Inventory>,
+    pub last: Option<CycleSummary>,
+    pub cases: Vec<Case>,
+    pub queue: retry::Queue,
+}
+
+impl Overview {
+    pub fn load(dir: &Path) -> Self {
+        Self {
+            feeds: read_state(dir, "feeds.json").unwrap_or_default(),
+            inventory: read_state(dir, "inventory.json"),
+            last: read_state(dir, "last-cycle.json"),
+            cases: read_cases(dir).into_values().collect(),
+            queue: retry::read(dir),
+        }
+    }
+
+    /// The sources whose last poll failed.
+    pub fn failing_sources(&self) -> Vec<(&String, &FeedState)> {
+        self.feeds.iter().filter(|(_, f)| f.error.as_deref().is_some_and(|e| !e.is_empty())).collect()
+    }
+
+    /// The cases in one status, most recently updated first.
+    pub fn by_status(&self, status: CaseStatus) -> Vec<&Case> {
+        let mut list: Vec<&Case> = self.cases.iter().filter(|c| c.status() == status).collect();
         list.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
         list
-    };
-    let classifier = match &config.classifier {
+    }
+}
+
+/// ` (by responder 3 h ago)` / ` (notified …)`: who handled a case and when; empty when no one has.
+pub(crate) fn handled_text(c: &Case) -> String {
+    match c.handled_by {
+        Some(by) if c.handled_at.as_deref().is_some_and(|a| !a.is_empty()) => format!(
+            " ({} {})",
+            if by == HandledBy::Notice {
+                "notified".to_string()
+            } else {
+                format!("by {}", serde_json::to_value(by).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default())
+            },
+            ago(c.handled_at.as_deref())
+        ),
+        _ => String::new(),
+    }
+}
+
+/// `act today; high, exploited, priority`: a case's rating and severity in a few words.
+pub(crate) fn case_tags(c: &Case) -> String {
+    format!(
+        "{}{}{}{}",
+        c.assessment.as_ref().map(|a| format!("{}; ", a.rating.as_str())).unwrap_or_default(),
+        c.severity.as_str(),
+        if c.exploited == Some(true) { ", exploited" } else { "" },
+        if c.priority == Some(true) { ", priority" } else { "" }
+    )
+}
+
+pub(crate) fn classifier_text(config: &Config) -> String {
+    match &config.classifier {
         Some(c) => format!("classifier.dev ({}, {})", c.model, if c.api_key.is_some() { "your key" } else { "anonymous free tier" }),
         None => "off (no key): prose advisories by name match only".to_string(),
-    };
-    let responder = match &config.responder {
+    }
+}
+
+pub(crate) fn responder_text(config: &Config) -> String {
+    match &config.responder {
         Some(r) => format!(
             "{}; fixes {}; works around on {}",
             r.agent.as_deref().or_else(|| r.command.for_mode(Mode::Propose).first().map(String::as_str)).unwrap_or(""),
@@ -529,7 +582,31 @@ fn status(config: &Config, show_closed: bool) -> Result<String> {
             if r.act_on.is_empty() { "nothing (proposes)".to_string() } else { r.act_on.join(", ") }
         ),
         None => "off (cases are notified directly)".to_string(),
-    };
+    }
+}
+
+/// Services seen as down or undeployed (the state file, or the `services` config list), as `status` words them.
+pub(crate) fn services_down(config: &Config, inventory: &Inventory) -> Vec<String> {
+    crate::service::service_states(config, inventory, util::now())
+        .iter()
+        .filter(|(_, r)| r.state.is_some_and(|s| s.is_down()))
+        .map(|(repo, r)| format!("{repo} ({})", if r.detail.is_empty() { r.state.map(|s| s.as_str()).unwrap_or("down").to_string() } else { r.detail.clone() }))
+        .collect()
+}
+
+/// A failing source as `status` words it: `id (error, last ok 3 h ago)`.
+pub(crate) fn source_error_text(id: &str, f: &FeedState) -> String {
+    format!("{id} ({}, last ok {})", f.error.as_deref().unwrap_or(""), ago(f.ok_at.as_deref()))
+}
+
+fn status(config: &Config, show_closed: bool) -> Result<String> {
+    let dir = &config.state_dir;
+    let overview = Overview::load(dir);
+    let Overview { feeds, inventory, last, queue, .. } = &overview;
+    let errors = overview.failing_sources();
+    let by_status = |status: CaseStatus| overview.by_status(status);
+    let classifier = classifier_text(config);
+    let responder = responder_text(config);
     let notifiers = notifier_lines(config, util::now());
     let rotation = match &config.rotation_map {
         Some(path) if path.exists() => {
@@ -574,13 +651,8 @@ fn status(config: &Config, show_closed: bool) -> Result<String> {
         lines.push(format!("  errors: {}", l.errors.iter().take(6).cloned().collect::<Vec<_>>().join("; ")));
     }
     lines.push(inventory.as_ref().map_or_else(|| "Inventory: not collected yet".to_string(), inventory_text));
-    // Services seen as down or undeployed (the state file, or the `services` config list).
-    if let Some(inventory) = &inventory {
-        let down: Vec<String> = crate::service::service_states(config, inventory, util::now())
-            .iter()
-            .filter(|(_, r)| r.state.is_some_and(|s| s.is_down()))
-            .map(|(repo, r)| format!("{repo} ({})", if r.detail.is_empty() { r.state.map(|s| s.as_str()).unwrap_or("down").to_string() } else { r.detail.clone() }))
-            .collect();
+    if let Some(inventory) = inventory {
+        let down = services_down(config, inventory);
         if !down.is_empty() {
             lines.push(format!("Services down: {}", down.join("; ")));
         }
@@ -592,18 +664,9 @@ fn status(config: &Config, show_closed: bool) -> Result<String> {
         if errors.is_empty() {
             String::new()
         } else {
-            format!(
-                ": {}",
-                errors
-                    .iter()
-                    .take(8)
-                    .map(|(id, f)| format!("{id} ({}, last ok {})", f.error.as_deref().unwrap_or(""), ago(f.ok_at.as_deref())))
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            )
+            format!(": {}", errors.iter().take(8).map(|(id, f)| source_error_text(id, f)).collect::<Vec<_>>().join("; "))
         }
     ));
-    let queue = retry::read(dir);
     if !queue.entries.is_empty() {
         let next = queue.entries.values().map(|e| e.next_at.as_str()).min().unwrap_or_default();
         let paused =
@@ -618,31 +681,10 @@ fn status(config: &Config, show_closed: bool) -> Result<String> {
         closed.len(),
         if closed.is_empty() || show_closed { String::new() } else { " (`status --closed` lists them)".to_string() }
     ));
-    let handled = |c: &Case| match c.handled_by {
-        Some(by) if c.handled_at.as_deref().is_some_and(|a| !a.is_empty()) => format!(
-            " ({} {})",
-            if by == HandledBy::Notice {
-                "notified".to_string()
-            } else {
-                format!("by {}", serde_json::to_value(by).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default())
-            },
-            ago(c.handled_at.as_deref())
-        ),
-        _ => String::new(),
-    };
-    let tags = |c: &Case| {
-        format!(
-            "{}{}{}{}",
-            c.assessment.as_ref().map(|a| format!("{}; ", a.rating.as_str())).unwrap_or_default(),
-            c.severity.as_str(),
-            if c.exploited == Some(true) { ", exploited" } else { "" },
-            if c.priority == Some(true) { ", priority" } else { "" }
-        )
-    };
     if !open.is_empty() {
         lines.push("Open:".to_string());
         for c in open.iter().take(25) {
-            lines.push(format!("  {} [{tags}] {}{}: {}", c.key, c.state.as_str(), handled(c), clip(&c.title, 100), tags = tags(c)));
+            lines.push(format!("  {} [{tags}] {}{}: {}", c.key, c.state.as_str(), handled_text(c), clip(&c.title, 100), tags = case_tags(c)));
             lines.push(format!(
                 "    {}{}{}{}",
                 c.reason,
@@ -662,7 +704,7 @@ fn status(config: &Config, show_closed: bool) -> Result<String> {
         lines.push("Waiting:".to_string());
         for c in waiting.iter().take(25) {
             let on = c.status_reason().map_or_else(String::new, |r| format!(" on {}: {}", r.as_str(), c.status_detail()));
-            lines.push(format!("  {} [{tags}] waiting{on}{}: {}", c.key, handled(c), clip(&c.title, 80), tags = tags(c)));
+            lines.push(format!("  {} [{tags}] waiting{on}{}: {}", c.key, handled_text(c), clip(&c.title, 80), tags = case_tags(c)));
         }
         if waiting.len() > 25 {
             lines.push(format!("  … {} more", waiting.len() - 25));
@@ -679,7 +721,7 @@ fn status(config: &Config, show_closed: bool) -> Result<String> {
     if show_closed {
         for c in closed.iter().take(25) {
             let why = c.status_reason().map_or_else(|| "closed".to_string(), |r| format!("closed, {}", r.as_str()));
-            lines.push(format!("  {} [{why}]{}: {}", c.key, handled(c), clip(&c.title, 80)));
+            lines.push(format!("  {} [{why}]{}: {}", c.key, handled_text(c), clip(&c.title, 80)));
         }
         if closed.len() > 25 {
             lines.push(format!("  … {} more", closed.len() - 25));
@@ -1186,7 +1228,12 @@ fn run(args: Vec<OsString>) -> Result<i32> {
             unsafe { std::env::set_var(&name, &value) };
         }
     }
-    fs::DirBuilder::new().recursive(true).mode(0o700).create(&config.state_dir).with_context(|| format!("create {}", config.state_dir.display()))?;
+    // The dashboard only reads: it creates nothing in the state dir, not even the dir.
+    if command == "dashboard" {
+        crate::state::set_read_only();
+    } else {
+        fs::DirBuilder::new().recursive(true).mode(0o700).create(&config.state_dir).with_context(|| format!("create {}", config.state_dir.display()))?;
+    }
     let write = |text: &str| -> Result<()> {
         match &opts.out {
             Some(out) => {
@@ -1224,6 +1271,17 @@ fn run(args: Vec<OsString>) -> Result<i32> {
         },
         "baseline" => write(&baseline(&config)?)?,
         "status" => say(&status(&config, opts.closed)?),
+        "dashboard" => match &opts.out {
+            Some(out) => {
+                write_private(Path::new(out), &crate::dashboard::render(&config))?;
+                // The mode only applies when the file is created: an older, wider one is narrowed too.
+                fs::set_permissions(out, std::os::unix::fs::PermissionsExt::from_mode(0o600)).with_context(|| format!("chmod {out}"))?;
+                say(&format!("wrote {out}"));
+            }
+            None => {
+                let _ = write!(std::io::stdout(), "{}", crate::dashboard::render(&config));
+            }
+        },
         "inbox" => {
             let entries = unread(&config.state_dir, opts.all)?;
             if let (Some(last), false) = (entries.last(), opts.peek) {

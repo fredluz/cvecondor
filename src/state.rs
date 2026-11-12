@@ -6,14 +6,23 @@
 use std::fs;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+/// Set by commands that must leave the state dir untouched (`dashboard`): a file that does not load is then not copied.
+static READ_ONLY: AtomicBool = AtomicBool::new(false);
+
+/// From now on this process never writes into the state dir while reading it.
+pub fn set_read_only() {
+    READ_ONLY.store(true, Ordering::SeqCst);
+}
+
 /// `None` when the file is missing or does not parse (the TS fallback). A file that exists but doesn't load is copied
-/// to `<name>.bad` first, so the caller's next write never loses it.
+/// to `<name>.bad` first, so the caller's next write never loses it (unless the process is read-only).
 pub fn read_state<T: DeserializeOwned>(dir: &Path, name: &str) -> Option<T> {
     let path = dir.join(name);
     let text = fs::read_to_string(&path).ok()?;
@@ -21,7 +30,9 @@ pub fn read_state<T: DeserializeOwned>(dir: &Path, name: &str) -> Option<T> {
         Ok(value) => Some(value),
         Err(e) => {
             let bad = dir.join(format!("{name}.bad"));
-            if fs::copy(&path, &bad).is_ok() {
+            if READ_ONLY.load(Ordering::SeqCst) {
+                crate::util::log(&format!("{}: unreadable ({e}); ignored", path.display()));
+            } else if fs::copy(&path, &bad).is_ok() {
                 crate::util::log(&format!("{}: unreadable ({e}); kept a copy at {}", path.display(), bad.display()));
             }
             None

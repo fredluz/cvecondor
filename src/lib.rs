@@ -7,6 +7,7 @@
 pub mod cli;
 pub mod config;
 pub mod cvelist;
+pub mod dashboard;
 pub mod feeds;
 pub mod fixes;
 pub mod follow;
