@@ -82,14 +82,16 @@ pub const NO_REPORT: &str = "ended without writing report.md";
 pub const REPORT_INCOMPLETE: &str = "ended before its report was finished";
 
 /// Whether the reason is an agent that ran and left its case unfinished (it said so, or wrote no complete report).
+/// Not when it also says its usage limit is reached: a run that ended without a report because the agent is out of
+/// quota is the responder being unavailable, for every case.
 pub fn is_case_level(reason: &str) -> bool {
-    [UNFINISHED_SAYS, NO_REPORT, REPORT_INCOMPLETE].iter().any(|prefix| reason.starts_with(prefix))
+    [UNFINISHED_SAYS, NO_REPORT, REPORT_INCOMPLETE].iter().any(|prefix| reason.starts_with(prefix)) && !is_limit(reason)
 }
 
 /// What a failure is about, without the words that differ from case to case and run to run: the agent's usage
 /// limit, or how the run ended (`exit 1`, `timed out after 60 min`, `could not start the responder`).
 pub fn cause_of(reason: &str) -> String {
-    if !is_case_level(reason) && is_limit(reason) {
+    if is_limit(reason) {
         return "usage limit".to_string();
     }
     reason.split(':').next().unwrap_or_default().trim().to_string()
@@ -477,6 +479,16 @@ mod tests {
         queue.fail("B", "timed out after 60 min", now, now);
         assert!(queue.stuck(now).is_some(), "a different cause is news");
         assert!(queue.stuck(now).is_none());
+    }
+
+    #[test]
+    fn a_far_off_limit_is_said_once_even_when_the_run_also_left_no_report() {
+        let failed = t("2026-10-22T10:00:00Z");
+        let mut queue = Queue::default();
+        queue.fail("A", "ended without writing report.md: usage limit reached; retry after 12 hours", failed, failed);
+        queue.fail("B", "exit 1: You've hit your session limit · resets 11:00pm (UTC)", failed, failed);
+        assert!(queue.stuck(failed).is_some(), "the responder is out of quota for hours");
+        assert!(queue.stuck(failed).is_none(), "one limit, one line");
     }
 
     #[test]
