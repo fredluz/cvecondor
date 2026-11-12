@@ -49,10 +49,11 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;margin:.4rem 0}
 .muted{color:var(--muted)}
 .bad{color:var(--bad);font-weight:600}
 .scroll{overflow-x:auto}
-table{border-collapse:collapse;width:100%}
+table{border-collapse:collapse;min-width:min(100%,32rem)}
 th,td{text-align:left;vertical-align:top;padding:.25rem .6rem .25rem 0;border-bottom:1px solid var(--line)}
 th{font-weight:600}
-td{overflow-wrap:anywhere}
+td{overflow-wrap:break-word}
+td:first-child{white-space:nowrap}
 article{margin:0 0 1rem;padding:0 0 .75rem;border-bottom:1px solid var(--line)}
 dl{margin:.25rem 0;display:grid;grid-template-columns:max-content 1fr;gap:.1rem .75rem}
 dt{color:var(--muted)}
@@ -310,7 +311,16 @@ impl Page<'_> {
             self.t(&responder_text(self.config))
         );
         out.push_str("</dl>\n");
-        let _ = writeln!(out, "<h3>Notifiers</h3>\n<pre>{}</pre>", self.t(&notifier_lines(self.config, util::now()).join("\n")));
+        // The heading says "Notifiers"; the status text's own "Notifiers:" prefix is dropped.
+        let lines: Vec<String> = notifier_lines(self.config, util::now())
+            .into_iter()
+            .filter_map(|l| match l.strip_prefix("Notifiers:").map(str::trim) {
+                Some("") => None,
+                Some(rest) => Some(rest.to_string()),
+                None => Some(l),
+            })
+            .collect();
+        let _ = writeln!(out, "<h3>Notifiers</h3>\n<pre>{}</pre>", self.t(&lines.join("\n")));
         out.push_str("<h3>Collectors</h3>\n");
         match overview.inventory.as_ref().filter(|i| !i.sources.is_empty()) {
             Some(inventory) => {
