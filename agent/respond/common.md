@@ -75,7 +75,7 @@ Any repo may be public, or go public later, and everything you push is read by w
 
 **The advisory ID** (a CVE, GHSA or other ID) may be named in the pull request body only on a PRIVATE repo. On a PUBLIC repo an open fix pull request announces an unpatched hole until it is merged, so it names no advisory anywhere, not even in a comment: a plain "bump X to Y" with the test result.
 
-**A workaround is not a fix.** A change that blocks a path until the fix ships shows by its shape what is exposed. On a PRIVATE repo it goes up as a pull request described only by what it changes ("Limit upload size", never why). On a PUBLIC repo you push nothing: the exact change (diff, tests, undo) goes in the report as a plan, as in `propose.md`, and the `## Message` says that you held it back because the repo is public.
+**A workaround is not a fix.** A change that blocks a path until the fix ships shows by its shape what is exposed. On a PRIVATE repo it goes up as a pull request described only by what it changes ("Limit upload size", never why). On a PUBLIC repo you push nothing: the exact change (diff, tests, undo) goes in the report as a plan, as in `propose.md`, and the `## Message` says that you held it back because the repo is public (`workaround.md` switches the triage path to `propose` then, so the case waits on the user's decision, not on the upstream fix).
 
 **What you know about the case** (the advisory, its exploitability, the service's state, other open cases) goes only to the report, the urgent lines and the user's agent, as everywhere else in this brief.
 
