@@ -92,7 +92,7 @@ fn only_texts_from_the_configured_chat_reach_the_agent_in_order_and_the_offset_p
     let (config, env) = setup(dir.path(), json!(["agent"]));
     let telegram = Telegram::new(vec![json!([
         text(10, 1, 999, "from a stranger"),
-        json!({ "update_id": 11, "message": { "message_id": 2, "chat": { "id": 42 }, "photo": [] } }),
+        json!({ "update_id": 11, "message": { "message_id": 2, "chat": { "id": 42 }, "new_chat_title": "x" } }),
         text(12, 5, 42, "first"),
         text(13, 6, 42, "second"),
     ])]);
@@ -411,4 +411,73 @@ fn status_says_whether_replies_are_on_and_whether_the_relay_is_reading_failing_o
     assert!(status_at(30).starts_with("replies on, FAILING: this bot has another getUpdates reader"), "{}", status_at(30));
     poll_once(&config, notifier(&config), &fetch, &agent, &|| now(), &options).expect("polls again");
     assert!(status_at(30).starts_with("replies on, reading"), "{}", status_at(30));
+}
+
+fn poll_updates(updates: Vec<Value>) -> (Telegram, Vec<String>, usize) {
+    let dir = TempDir::new("cvecondor-relay");
+    let (config, env) = setup(dir.path(), json!(["agent"]));
+    let telegram = Telegram::new(vec![json!(updates)]);
+    let agent = |_: &RelayJob| -> Result<String> { panic!("a message without text must not reach the agent") };
+    let logged = Mutex::new(Vec::<String>::new());
+    let log = |line: &str| logged.lock().unwrap_or_else(PoisonError::into_inner).push(line.to_string());
+    let options = PollOptions { env: Some(&env), log: Some(&log), ..PollOptions::default() };
+    let fetch = |req: Request| telegram.fetch(req);
+    let handled = poll_once(&config, notifier(&config), &fetch, &agent, &|| now(), &options).expect("polls");
+    let lines = logged.lock().unwrap_or_else(PoisonError::into_inner).clone();
+    (telegram, lines, handled)
+}
+
+fn media(update_id: i64, message_id: i64, chat: i64, field: &str) -> Value {
+    json!({ "update_id": update_id, "message": { "message_id": message_id, "chat": { "id": chat }, field: { "file_id": "SECRET-FILE-ID" }, "caption": "SECRET-CAPTION" } })
+}
+
+#[test]
+fn a_voice_note_from_the_configured_chat_is_told_it_cannot_be_read_and_the_agent_is_not_run() {
+    let (telegram, logged, handled) = poll_updates(vec![media(30, 7, 42, "voice")]);
+    assert_eq!(handled, 0);
+    let sent = telegram.sent();
+    assert_eq!(sent.len(), 1);
+    assert_eq!((sent[0]["chat_id"].as_str(), sent[0]["reply_to_message_id"].as_i64()), (Some("42"), Some(7)));
+    assert_eq!(sent[0]["text"].as_str(), Some("I can only read text messages for now; voice notes aren't supported yet. Please type your message."));
+    let logged = logged.join("\n");
+    assert!(logged.contains("relay: told chat 42 that a voice note can't be read"), "{logged}");
+    assert!(!logged.contains("SECRET") && !sent[0].to_string().contains("SECRET"));
+}
+
+#[test]
+fn a_photo_gets_the_generic_reply_naming_it() {
+    let (telegram, _, _) = poll_updates(vec![media(31, 8, 42, "photo")]);
+    let sent = telegram.sent();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0]["text"].as_str(), Some("I can only read text messages for now (got a photo). Please type your message."));
+    assert_eq!(sent[0]["reply_to_message_id"].as_i64(), Some(8));
+}
+
+#[test]
+fn a_voice_note_from_another_chat_a_service_message_and_other_updates_get_nothing() {
+    let (telegram, logged, handled) = poll_updates(vec![
+        media(40, 1, 999, "voice"),
+        json!({ "update_id": 41, "message": { "message_id": 2, "chat": { "id": 42 }, "new_chat_members": [{ "id": 5 }] } }),
+        json!({ "update_id": 42, "message": { "message_id": 3, "chat": { "id": 42 }, "pinned_message": { "message_id": 1 } } }),
+        json!({ "update_id": 43, "edited_message": { "message_id": 4, "chat": { "id": 42 }, "voice": {} } }),
+        json!({ "update_id": 44, "message": { "message_id": 5, "chat": { "id": 42 }, "text": "  " } }),
+    ]);
+    assert_eq!(handled, 0);
+    assert!(telegram.sent().is_empty(), "{:?}", telegram.sent());
+    assert_eq!(logged.iter().filter(|l| l.contains("ignored an update")).count(), 5, "{logged:?}");
+}
+
+#[test]
+fn a_text_message_is_still_answered_next_to_an_unreadable_one() {
+    let dir = TempDir::new("cvecondor-relay");
+    let (config, env) = setup(dir.path(), json!(["agent"]));
+    let telegram = Telegram::new(vec![json!([media(50, 1, 42, "sticker"), text(51, 2, 42, "hello")])]);
+    let agent = |job: &RelayJob| -> Result<String> { Ok(format!("answer to {}", job.text)) };
+    let options = PollOptions { env: Some(&env), ..PollOptions::default() };
+    let fetch = |req: Request| telegram.fetch(req);
+    assert_eq!(poll_once(&config, notifier(&config), &fetch, &agent, &|| now(), &options).expect("polls"), 1);
+    let sent = telegram.sent();
+    assert_eq!(sent.len(), 2);
+    assert!(sent[0]["text"].as_str().unwrap_or("").contains("got a sticker"));
+    assert_eq!(sent[1]["text"].as_str(), Some("answer to hello"));
 }

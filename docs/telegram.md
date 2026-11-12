@@ -10,7 +10,7 @@ The user does only what only they can do inside Telegram: create the bot, tap St
 
 - **Out:** a `telegram` notifier posts every notice it is subscribed to (`events`, default `urgent`) to its `chatId`.
 - **In** (only with `"replies": true`; needs a `responder`, or the config does not load): the watcher long-polls the bot (`src/relay.rs`).
-  - Only **text messages from the configured chat** are answered. Voice messages, photos, files, stickers, edits and anything from another chat get **no answer**; voice replies are planned ([issue #2](https://github.com/fredluz/cvecondor/issues/2)). Tell the user to type.
+  - Only **text messages from the configured chat** are answered. A voice message, photo, file, sticker or similar from that chat gets one short reply saying only text is read (voice is planned, [issue #2](https://github.com/fredluz/cvecondor/issues/2)); edits, service messages and anything from another chat get **no answer**. Tell the user to type.
   - Each text goes to the agent with `AGENTS.md`, the last five urgent lines, and the message they replied to if they used Telegram's reply. Messages are handled one at a time; one run is allowed 15 minutes; the answer is cut to 1000 characters.
   - If the agent can't run (its quota, its login, a timeout), the bot says so in the chat, keeps the message and answers it later, marked late.
   - Each exchange is kept in the inbox as `reply: <their text>`.
@@ -96,7 +96,7 @@ It never confirms an update, so it is safe to run at any time, including while t
    ```
    An entry `[report] reply: are you there?` means the relay passed the message to the agent in charge and sent the answer. Ask the user whether they saw the answer in Telegram.
 
-Then tell the user, in two lines: what arrives on Telegram (urgent lines only, everything else waits for you), and that they can answer in text there, **not by voice message: it gets no answer yet** ([issue #2](https://github.com/fredluz/cvecondor/issues/2)).
+Then tell the user, in two lines: what arrives on Telegram (urgent lines only, everything else waits for you), and that they can answer in text there, **not by voice message: it only gets a reply saying so** ([issue #2](https://github.com/fredluz/cvecondor/issues/2)).
 
 Record in `deployment.md`: the notifier is Telegram, the bot's username (not the token), whether replies are on, and that the token is `TELEGRAM_BOT_TOKEN` in the env file (revoke: BotFather → `/revoke`).
 
@@ -118,5 +118,5 @@ Say what failed in plain words, and fix the cause; don't re-ask the user to repe
 | `status` says `NOT reading` | The watcher isn't running, wasn't restarted after the config change, or runs from cron or the Action (answers come at the end of each cycle). Check `deployment.md`. |
 | `status` says `FAILING: this bot has another getUpdates reader or a webhook` | Something else uses this bot (another program, a webhook). Stop it, or make a new bot for CVECondor and redo steps 2–5. |
 | `status` says `FAILING: getUpdates: HTTP 401` | The token was revoked after setup. Step 3 with a fresh token, restart. |
-| The user wrote, got no answer, and `status` says `reading` | They wrote from a different chat than `chatId` (`cvecondor telegram-chat` lists the chats that wrote, and `--use` switches), or sent a voice message, photo or file (never answered), or wrote before the relay's first read. Ask them to type in the bot's private chat once more. |
+| The user wrote, got no answer, and `status` says `reading` | They wrote from a different chat than `chatId` (`cvecondor telegram-chat` lists the chats that wrote, and `--use` switches), or wrote before the relay's first read. Ask them to type in the bot's private chat once more. |
 | The bot answers `I can't answer right now (…)` | The relay works; the agent CLI behind the responder can't run (login, quota). The message is kept and answered later. Fix the responder (`agent/setup.md` step 4b; `cvecondor respond <key> --mode propose` shows whether it runs). |

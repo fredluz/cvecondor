@@ -516,6 +516,35 @@ fn read_message(update: &Value) -> Option<(String, Option<Incoming>)> {
     Some((chat, incoming))
 }
 
+/// What a user's message without text is, by the Telegram field it carries. A whitelist on purpose: service messages
+/// (new_chat_members, pinned_message, ...) carry none of these fields and stay silent, as does any kind not listed.
+const UNREADABLE: [(&str, &str); 14] = [
+    ("voice", "voice note"),
+    ("audio", "audio file"),
+    ("video_note", "video message"),
+    ("video", "video"),
+    ("photo", "photo"),
+    ("sticker", "sticker"),
+    ("animation", "GIF"),
+    ("document", "file"),
+    ("location", "location"),
+    ("venue", "location"),
+    ("contact", "contact"),
+    ("poll", "poll"),
+    ("dice", "dice"),
+    ("story", "story"),
+];
+
+/// A message from a user with no text in it (`None` for a text, a service message or anything else): its id and kind.
+fn unreadable_kind(update: &Value) -> Option<(i64, &'static str)> {
+    let message = update.get("message")?;
+    if message.get("text").and_then(Value::as_str).is_some_and(|t| !t.trim().is_empty()) {
+        return None;
+    }
+    let id = message.get("message_id")?.as_i64()?;
+    UNREADABLE.iter().find(|(field, _)| message.get(*field).is_some()).map(|(_, kind)| (id, *kind))
+}
+
 /// The same title as a notifier would give a line: one line, at most `TITLE_CHARS` characters.
 fn title_of(text: &str) -> String {
     let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -623,7 +652,10 @@ fn poll(
         let mut incoming = match incoming {
             Some(incoming) if chat == chat_id => incoming,
             _ => {
-                options.say(&format!("relay: ignored an update from chat {chat}"));
+                match unreadable_kind(update).filter(|_| chat == chat_id) {
+                    Some((message_id, kind)) => tell_unreadable(config, token, chat_id, message_id, kind, fetch, options),
+                    None => options.say(&format!("relay: ignored an update from chat {chat}")),
+                }
                 continue;
             }
         };
@@ -650,6 +682,20 @@ fn poll(
         }
     }
     Ok(handled + retried)
+}
+
+/// Says once that a message without text is not read. The agent is not run and nothing is kept: there is no text to
+/// keep or to retry. Nothing of the message but its kind is used.
+fn tell_unreadable(config: &Config, token: &str, chat_id: &str, message_id: i64, kind: &str, fetch: &dyn Fetch, options: &PollOptions) {
+    let told = if kind == "voice note" || kind == "audio file" {
+        "I can only read text messages for now; voice notes aren't supported yet. Please type your message.".to_string()
+    } else {
+        format!("I can only read text messages for now (got a {kind}). Please type your message.")
+    };
+    match send_reply(config, token, chat_id, message_id, &told, fetch) {
+        Ok(()) => options.say(&format!("relay: told chat {chat_id} that a {kind} can't be read")),
+        Err(e) => options.say(&format!("relay: could not send the reply: {}", scrub(config, token, &format!("{e:#}")))),
+    }
 }
 
 /// Runs the agent on one message and sends its answer back to the chat. An error: the agent did not answer.
