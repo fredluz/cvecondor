@@ -201,7 +201,7 @@ fn propose_mode_stays_shell_less_except_the_reach_the_user_commands() {
     let c = case("p", "pending", &dir.path().join("p.md"));
     let prompt = |reach: &[&str]| {
         let config = test_config(json!({ "responder": { "agent": "claude", "reach": reach } }));
-        build_prompt(&config, &c, &case_file, Mode::Propose, dir.path(), &[]).expect("builds")
+        build_prompt(&config, &c, &case_file, Mode::Propose, dir.path(), &[], &[]).expect("builds")
     };
     let reach_line =
         |reach: &[&str]| prompt(reach).lines().find(|l| l.starts_with("Reach-the-user commands")).expect("the prompt has the reach line").to_string();
@@ -488,7 +488,7 @@ fn a_run_for_a_case_a_pull_request_already_covers_is_told_to_build_on_it() {
     let case_file = dir.path().join("q.json");
     fs::write(&case_file, "{}").expect("writes the case");
     let plain = case("q", "pending", &dir.path().join("q.md"));
-    let prompt = build_prompt(&config, &plain, &case_file, Mode::Update, dir.path(), &[]).expect("the prompt");
+    let prompt = build_prompt(&config, &plain, &case_file, Mode::Update, dir.path(), &[], &[]).expect("the prompt");
     assert!(!prompt.contains("\n## Already on record for this case\n"), "a first run has nothing on record");
 
     let covered = Case {
@@ -496,8 +496,60 @@ fn a_run_for_a_case_a_pull_request_already_covers_is_told_to_build_on_it() {
         previous_report: Some("/data/reports/earlier.md".to_string()),
         ..plain
     };
-    let prompt = build_prompt(&config, &covered, &case_file, Mode::Update, dir.path(), &[]).expect("the prompt");
+    let prompt = build_prompt(&config, &covered, &case_file, Mode::Update, dir.path(), &[], &[]).expect("the prompt");
     assert!(prompt.contains("A fix pull request for exactly this advisory is already open: https://github.com/acme/api/pull/42"));
     assert!(prompt.contains("`already-handled`"));
     assert!(prompt.contains("The earlier report (/data/reports/earlier.md) established"));
+}
+
+/// What the responder is told about each repo comes from GitHub at the start of the run, and unknown is public.
+#[test]
+fn a_run_reads_each_repos_visibility_from_github_and_tells_the_responder_unknown_means_public() {
+    use cvecondor::http::{Request, Response};
+    use std::sync::Mutex;
+
+    let dir = TempDir::new("cvecondor-responder");
+    let agent = dir.path().join("fake-agent.sh");
+    fs::write(&agent, "printf '## Message\\nact this week: done.\\n' > \"$CVECONDOR_WORKDIR/report.md\"\n").expect("writes the agent");
+    let config = config_in(&dir, json!({ "command": ["sh", agent] }), &[("GITHUB_TOKEN".to_string(), "ghp_unused".to_string())].into());
+    let advisory = "CVE-2026-99999";
+    let mut c = case("GHSA-xxxx-yyyy-zzzz", "pending", &dir.path().join("q.md"));
+    c.aliases = vec![advisory.to_string()];
+    c.places = ["acme/private-api", "acme/public-site", "acme/gone"].iter().map(|r| cvecondor::watch::Place { host: "github".into(), r#where: format!("repo:{r}") }).collect();
+    let case_file = dir.path().join("q.json");
+    fs::write(&case_file, "{}").expect("writes the case");
+
+    let asked = Mutex::new(Vec::new());
+    let fetch = |req: Request| -> anyhow::Result<Response> {
+        asked.lock().expect("lock").push(req.url.clone());
+        let body = match req.url.rsplit('/').next().unwrap_or_default() {
+            "private-api" => Some(json!({ "private": true, "visibility": "private" })),
+            "public-site" => Some(json!({ "private": false, "visibility": "public" })),
+            _ => None,
+        };
+        Ok(Response { status: if body.is_some() { 200 } else { 404 }, headers: Vec::new(), body: body.unwrap_or_else(|| json!({ "message": "Not Found" })).to_string().into_bytes() })
+    };
+    // Clones go to a path that does not exist, so the run never touches the network for them.
+    let mut env = process_env();
+    env.extend([
+        ("GIT_CONFIG_COUNT".to_string(), "1".to_string()),
+        ("GIT_CONFIG_KEY_0".to_string(), "url.file:///nonexistent/.insteadOf".to_string()),
+        ("GIT_CONFIG_VALUE_0".to_string(), "https://github.com/".to_string()),
+        ("GITHUB_TOKEN".to_string(), "ghp_unused".to_string()),
+    ]);
+    start_response_with(&config, &c, &case_file, Mode::Update, recorder().notifier(), &StartOptions { env: Some(&env), fetch: Some(&fetch), ..StartOptions::default() })
+        .expect("starts");
+    wait_running();
+    let prompt = prompt_of(dir.path());
+    let section = prompt.split("\n## What you may write into each repo\n").nth(1).expect("the brief has the section").split("\nCase file:").next().expect("it ends before the case file");
+    assert!(section.contains("- acme/private-api: PRIVATE\n"), "{section}");
+    assert!(section.contains("- acme/public-site: PUBLIC\n"), "{section}");
+    assert!(section.contains("- acme/gone: PUBLIC (its visibility could not be read: treated as public)"), "{section}");
+    assert!(!section.contains(advisory) && !section.contains(&c.key), "the section names no advisory: {section}");
+    assert_eq!(asked.lock().expect("lock").len(), 3, "one read per repo");
+
+    // A case with no repo has no such section, and the shipped rules no longer name branches after the case.
+    let none = build_prompt(&config, &case("n", "pending", &dir.path().join("n.md")), &case_file, Mode::Update, dir.path(), &[], &[]).expect("the prompt");
+    assert!(!none.contains("\n## What you may write into each repo\n"));
+    assert!(!none.contains("cvecondor/<case>"), "a branch is named for the package and version, never the case");
 }

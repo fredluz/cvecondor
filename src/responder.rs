@@ -27,12 +27,14 @@ use regex::Regex;
 
 use crate::config::{Agent, Config, empty_responder_env, Env, Mode, NotifyEvent, SHIPPED_BRIEF_FILES, process_env, read_brief, redact, shipped_brief};
 use crate::fixes::parse_waits;
+use crate::http::{Fetch, Net};
 use crate::name::{ENV_PREFIX, NAME};
 use crate::notify::{Notice, Notifier};
 use crate::retry::{NO_REPORT, REPORT_INCOMPLETE, UNFINISHED_SAYS};
 use crate::state::{read_state, slug, write_file_atomic, write_state};
 use crate::upstream::parse_fixed;
 use crate::util::{self, iso};
+use crate::visibility::{RepoVisibility, brief_section, visibilities};
 use crate::watch::{Case, ResponseRecord, ResponseState, Triage, TriagePath, final_rating, read_responses};
 
 /// Claude Code tools that keep a headless run open after its work is done (scheduled wake-ups, monitors, cron jobs).
@@ -221,7 +223,7 @@ fn earlier_run(record: &ResponseRecord) -> String {
 }
 
 /// Triage first: the standing brief, then this case.
-pub fn build_prompt(config: &Config, c: &Case, case_file: &Path, mode: Mode, workdir: &Path, clones: &[String]) -> Result<String> {
+pub fn build_prompt(config: &Config, c: &Case, case_file: &Path, mode: Mode, workdir: &Path, clones: &[String], repos: &[RepoVisibility]) -> Result<String> {
     let r = config.responder.as_ref().ok_or_else(|| anyhow!("no responder configured"))?;
     let brief = build_brief(config, workdir)?;
     let mode_text = match mode {
@@ -267,6 +269,7 @@ pub fn build_prompt(config: &Config, c: &Case, case_file: &Path, mode: Mode, wor
             workdir.join("report.md").display()
         ),
         clones_line,
+        brief_section(repos).trim_end().to_string(),
         format!("Case file: {}", case_file.display()),
         String::new(),
         "```json".to_string(),
@@ -527,11 +530,15 @@ fn run_child(spec: &ChildSpec, on_spawn: impl FnOnce(Option<u32>)) -> Ran {
     Ran { code: status.and_then(|s| s.code()), stdout, stderr, idle_ended, timed_out: terminated_at.is_some(), unstarted: false }
 }
 
+/// The repos a case touches (`owner/name`), each once, in the order its places name them.
+fn case_repos(c: &Case) -> Vec<&str> {
+    c.places.iter().filter_map(|p| p.r#where.strip_prefix("repo:")).collect::<IndexSet<_>>().into_iter().collect()
+}
+
 /// Clones the case's repos with the user's own git login (never the read-only inventory token).
 fn clone_repos(config: &Config, base: &Env, c: &Case, workdir: &Path) -> Vec<String> {
-    let repos: Vec<&str> = c.places.iter().filter_map(|p| p.r#where.strip_prefix("repo:")).collect::<IndexSet<_>>().into_iter().take(5).collect();
     let mut out = Vec::new();
-    for repo in repos {
+    for repo in case_repos(c).into_iter().take(5) {
         let target = workdir.join("repos").join(repo.replacen('/', "__", 1));
         let argv: Vec<String> = ["git", "clone", "--depth", "50", "--quiet"]
             .iter()
@@ -606,12 +613,14 @@ pub fn running_count() -> usize {
 }
 
 /// What `start_response_with` can change.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct StartOptions<'a> {
     /// Dispatched by a cycle, so its result goes into the batch's report rather than a report of its own.
     pub batch: bool,
     /// The environment the responder's is derived from. Default: the process environment.
     pub env: Option<&'a Env>,
+    /// What reads each repo's visibility from GitHub. Default: the real client.
+    pub fetch: Option<&'a dyn Fetch>,
     /// How long a written, unchanged report with a silent child ends the run. Default: 2 minutes.
     pub report_idle: Option<Duration>,
     /// Another run of a case whose last run did not finish: the urgent lines that run sent are not sent again, and
@@ -643,7 +652,9 @@ pub fn start_response_with(config: &Config, c: &Case, case_file: &Path, mode: Mo
     // A retry does not repeat what the run before it already told the user, nor what it already did.
     let previous = if options.retry { read_state::<ResponseRecord>(&config.state_dir, &record_name) } else { None };
     let earlier = previous.as_ref().map(|r| r.urgent.clone()).unwrap_or_default();
-    let mut prompt = build_prompt(config, c, case_file, mode, &workdir, &clones)?;
+    // Whether each repo is public decides what the responder may write there; read now, with the user's own token.
+    let visibility = visibilities(config, options.fetch.unwrap_or(&Net), &case_repos(c));
+    let mut prompt = build_prompt(config, c, case_file, mode, &workdir, &clones, &visibility)?;
     if let Some(previous) = &previous {
         prompt.push_str(&earlier_run(previous));
     }

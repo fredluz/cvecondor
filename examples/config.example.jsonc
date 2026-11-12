@@ -38,8 +38,8 @@
   // Optional. What the state file can't see, per repo: "project" binds a repo to a compose project
   // whose name differs; "deployed: false"/"running: false" mark a service down by hand (that wins);
   // "running: true" marks one running somewhere the file can't see (it wins over the file too).
-  // A down or undeployed service is never called exploitable: its fix PR still opens, its repo's
-  // NOTES.md logs it, and the case waits on the service, not on you.
+  // A down or undeployed service is never called exploitable: its fix PR still opens, a private
+  // repo's NOTES.md gets one neutral line (a public repo gets none), and the case waits on the service, not on you.
   // "services": [
   //   { "repo": "your-org/api", "project": "api-prod" },
   //   { "repo": "your-org/shop", "running": true, "note": "prod runs on another platform" },
