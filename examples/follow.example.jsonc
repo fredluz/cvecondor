@@ -32,6 +32,8 @@
   //    ({line} is the line), or one that opens a pane or tab of your own terminal running your agent ({prompt} is
   //    the opening message: the line and what the agent is told). With neither, the line goes on stdin.
   // "deliver": ["my-agent", "send", "inbox", "{line}"],
+  // Don't write where else the line went ("it also went to Telegram") into a `deliver` text: follow can't know,
+  // and a notifier that is off or failing makes it false. The line is all that is known to have arrived.
 
   // A desktop notification per line as well (osascript on macOS, notify-send on Linux). Default true.
   "notification": true

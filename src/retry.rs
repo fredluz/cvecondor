@@ -4,7 +4,8 @@
 //! The retry queue: a responder run that did not finish is never dropped. Its case waits here, with why, until
 //! the agent's own reset time when it named one, else after a backoff that doubles up to a cap. The cycle drains the
 //! queue within `maxPerCycle`, most urgent first, so a reset does not fire every waiting case at once. A cause that
-//! will not fix itself (the same error again and again, or a limit days away) is said once, as an urgent line.
+//! will not fix itself (the same error again and again, or a limit days away) is said once per cause, as an urgent
+//! line. An agent that ran and reported `Unfinished` on one case is that case's retry, not a responder that can't run.
 
 use std::path::Path;
 use std::sync::LazyLock;
@@ -32,7 +33,7 @@ const BACKOFF_FIRST_MS: i64 = 5 * 60_000;
 const BACKOFF_CAP_MS: i64 = 3 * 3_600_000;
 /// A run may start this long after the agent's named reset, not on the second.
 const AFTER_RESET_MS: i64 = 60_000;
-/// The same failure this many times in a row is one that will not fix itself.
+/// The same cause this many times in a row is one that will not fix itself.
 pub const STUCK_AFTER: u32 = 3;
 /// A limit that resets further away than this will not clear on its own soon enough either.
 const LIMIT_LONG_MS: i64 = 6 * 3_600_000;
@@ -46,7 +47,7 @@ pub struct Entry {
     pub reason: String,
     /// Failed runs since the case last finished one.
     pub attempts: u32,
-    /// Failed runs in a row with this reason.
+    /// Failed runs in a row with this cause (`cause_of`), whatever the agent's words were each time.
     pub streak: u32,
     /// The agent's usage limit, not an error of its own.
     pub limit: bool,
@@ -64,13 +65,34 @@ pub struct Queue {
     /// The agent said it is out of quota until then: nothing is started before it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paused_until: Option<String>,
-    /// The reason last said urgently that the responder can't run, so it is said once.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub blocked_told: Option<String>,
+    /// The causes said urgently as "the responder can't run" while entries with that cause still wait, so each is
+    /// said once however many cases or runs it hits. A cause is forgotten when no queued case has it any more.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub told_causes: Vec<String>,
     /// Per case, `startedAt` of the last failed response run counted: a record is counted once, even after its
     /// case left the queue (a newer event replaced the retry) while the record still stands.
     #[serde(default)]
     pub counted: IndexMap<String, String>,
+}
+
+/// How the agent's run ended when it ran and said it is not done: the case's own retry, not a responder that can't run.
+pub const UNFINISHED_SAYS: &str = "its report says it is unfinished";
+pub const NO_REPORT: &str = "ended without writing report.md";
+/// Starts both reasons of a report that is there but not complete.
+pub const REPORT_INCOMPLETE: &str = "ended before its report was finished";
+
+/// Whether the reason is an agent that ran and left its case unfinished (it said so, or wrote no complete report).
+pub fn is_case_level(reason: &str) -> bool {
+    [UNFINISHED_SAYS, NO_REPORT, REPORT_INCOMPLETE].iter().any(|prefix| reason.starts_with(prefix))
+}
+
+/// What a failure is about, without the words that differ from case to case and run to run: the agent's usage
+/// limit, or how the run ended (`exit 1`, `timed out after 60 min`, `could not start the responder`).
+pub fn cause_of(reason: &str) -> String {
+    if !is_case_level(reason) && is_limit(reason) {
+        return "usage limit".to_string();
+    }
+    reason.split(':').next().unwrap_or_default().trim().to_string()
 }
 
 pub fn read(dir: &Path) -> Queue {
@@ -192,7 +214,7 @@ impl Queue {
         let before = self.entries.get(key);
         let reason = reason.split('\n').next().unwrap_or_default().trim().to_string();
         let (attempts, streak) = match before {
-            Some(e) => (e.attempts + 1, if e.reason == reason { e.streak + 1 } else { 1 }),
+            Some(e) => (e.attempts + 1, if cause_of(&e.reason) == cause_of(&reason) { e.streak + 1 } else { 1 }),
             None => (1, 1),
         };
         let limit = is_limit(&reason);
@@ -217,10 +239,10 @@ impl Queue {
         self.entries.insert(key.to_string(), entry).is_none()
     }
 
-    /// A run finished: the case leaves the queue, and an earlier "can't run" is over.
+    /// A run finished: the case leaves the queue, and a "can't run" no waiting case has the cause of is over.
     pub fn done(&mut self, key: &str) {
         if self.entries.shift_remove(key).is_some() {
-            self.blocked_told = None;
+            self.forget_settled();
             let paused = self.entries.values().filter(|e| e.limit).filter_map(|e| parse_time(&e.next_at)).max();
             self.paused_until = paused.map(iso);
         }
@@ -238,18 +260,27 @@ impl Queue {
         self.entries.shift_remove(key);
     }
 
-    /// The entry that can't be expected to fix itself and has not been said yet: it fails the same way again and
-    /// again, or the agent's limit resets too far away. Marks it said.
+    /// Forgets the told causes no waiting case has: the next time one blocks, it is news again.
+    fn forget_settled(&mut self) {
+        let live: Vec<String> = self.entries.values().filter(|e| !is_case_level(&e.reason)).map(|e| cause_of(&e.reason)).collect();
+        self.told_causes.retain(|cause| live.contains(cause));
+    }
+
+    /// The entry whose cause can't be expected to fix itself and has not been said yet: the run fails the same way
+    /// again and again, or the agent's limit resets too far away. Marks the cause said, so no other case with it
+    /// says it again, whatever the agent wrote about that case. A case the agent ran and left unfinished never counts.
     pub fn stuck(&mut self, now: Timestamp) -> Option<Entry> {
+        self.forget_settled();
         let entry = self
             .entries
             .values()
             .find(|e| {
-                self.blocked_told.as_deref() != Some(e.reason.as_str())
+                !is_case_level(&e.reason)
+                    && !self.told_causes.contains(&cause_of(&e.reason))
                     && ((!e.limit && e.streak >= STUCK_AFTER) || (e.limit && parse_time(&e.next_at).is_some_and(|t| t.as_millisecond() - now.as_millisecond() > LIMIT_LONG_MS)))
             })
             .cloned()?;
-        self.blocked_told = Some(entry.reason.clone());
+        self.told_causes.push(cause_of(&entry.reason));
         Some(entry)
     }
 
@@ -297,6 +328,7 @@ fn report_head(record: &ResponseRecord) -> String {
 pub fn absorb(queue: &mut Queue, records: &[ResponseRecord], cases: &indexmap::IndexMap<String, Case>, now: Timestamp) -> Absorbed {
     let mut out = Absorbed::default();
     queue.entries.retain(|key, _| cases.contains_key(key));
+    queue.forget_settled();
     queue.counted.retain(|key, _| cases.contains_key(key));
     for record in records {
         if !cases.contains_key(&record.key) {
@@ -411,9 +443,51 @@ mod tests {
         queue.fail("B", "exit 1: Invalid API key · Please run /login", now, now);
         assert!(queue.stuck(now).is_none(), "not again on the next retry");
         queue.done("A");
-        queue.fail("A", "exit 1: Invalid API key · Please run /login", now, now);
-        queue.fail("A", "exit 1: Invalid API key · Please run /login", now, now);
-        queue.fail("A", "exit 1: Invalid API key · Please run /login", now, now);
-        assert!(queue.stuck(now).is_some(), "a new outage after a success is said again");
+        for _ in 0..3 {
+            queue.fail("C", "exit 1: Invalid API key · Please run /login", now, now);
+        }
+        assert!(queue.stuck(now).is_none(), "one case finishing, or another failing alike, is the same outage");
+        queue.done("B");
+        queue.done("C");
+        assert!(queue.stuck(now).is_none());
+        for _ in 0..3 {
+            queue.fail("A", "exit 1: Invalid API key · Please run /login", now, now);
+        }
+        assert!(queue.stuck(now).is_some(), "an outage after the queue emptied is said again");
+    }
+
+    #[test]
+    fn the_agents_words_do_not_make_a_new_cause() {
+        let now = t("2026-10-22T10:00:00Z");
+        let mut queue = Queue::default();
+        for (i, key) in ["A", "B", "C"].iter().enumerate() {
+            queue.fail(key, &format!("exit 1: could not reach case {i}: different words each time"), now, now);
+        }
+        for _ in 0..2 {
+            queue.fail("A", "exit 1: yet another sentence", now, now);
+        }
+        assert_eq!(queue.entries["A"].streak, 3, "the same way of failing counts, not its wording");
+        assert!(queue.stuck(now).is_some());
+        for _ in 0..3 {
+            queue.fail("B", "exit 1: and one more wording", now, now);
+        }
+        assert!(queue.stuck(now).is_none(), "said once for the cause");
+        queue.fail("B", "timed out after 60 min", now, now);
+        queue.fail("B", "timed out after 60 min", now, now);
+        queue.fail("B", "timed out after 60 min", now, now);
+        assert!(queue.stuck(now).is_some(), "a different cause is news");
+        assert!(queue.stuck(now).is_none());
+    }
+
+    #[test]
+    fn an_agent_that_ran_and_left_a_case_unfinished_is_a_case_retry_not_a_blocked_responder() {
+        let now = t("2026-10-22T10:00:00Z");
+        let mut queue = Queue::default();
+        for _ in 0..6 {
+            queue.fail("A", "its report says it is unfinished: Working... waiting on a subagent", now, now);
+            queue.fail("B", "ended before its report was finished (report.md has no `## Message`)", now, now);
+        }
+        assert!(queue.stuck(now).is_none(), "never a responder-can't-run line");
+        assert!(queue.entries["A"].streak >= STUCK_AFTER, "it still waits and retries");
     }
 }

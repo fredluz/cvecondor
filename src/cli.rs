@@ -21,7 +21,7 @@ use jiff::Timestamp;
 use regex::Regex;
 use serde::Serialize;
 
-use crate::config::{Config, Mode, NotifyEvent, load_config, load_env_file, process_env, redact};
+use crate::config::{Config, Mode, NotifyEvent, empty_responder_env, load_config, load_env_file, process_env, redact};
 use crate::feeds::{FeedState, NEWS_SOURCES, SOURCES, SourceKind};
 use crate::fixes::{describe_wait, parse_waits};
 use crate::http::{Fetch, Net, Request, Response};
@@ -444,6 +444,11 @@ extern "C" fn on_stop_signal(_: libc::c_int) {
 
 fn daemon(config: &Config) -> Result<()> {
     log(&format!("{NAME} {VERSION}: every {} min, inventory every {} h, state {}", config.poll_minutes, config.inventory_hours, config.state_dir.display()));
+    // Said once, here: every run would fail on it, and the retry queue says it once more when they do.
+    let empty = empty_responder_env(config);
+    if !empty.is_empty() {
+        log(&format!("responder not usable: {}", crate::responder::empty_env_text(&empty)));
+    }
     let handler = on_stop_signal as extern "C" fn(libc::c_int) as usize;
     // SAFETY: the handler only stores to an atomic, which is async-signal-safe.
     unsafe {
@@ -561,6 +566,10 @@ fn status(config: &Config, show_closed: bool) -> Result<String> {
         ),
     ];
     lines.splice(2..2, notifiers);
+    let empty = empty_responder_env(config);
+    if !empty.is_empty() {
+        lines.insert(2, format!("Responder env: {}", crate::responder::empty_env_text(&empty)));
+    }
     if let Some(l) = last.as_ref().filter(|l| !l.errors.is_empty()) {
         lines.push(format!("  errors: {}", l.errors.iter().take(6).cloned().collect::<Vec<_>>().join("; ")));
     }

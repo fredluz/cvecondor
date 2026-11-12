@@ -2570,10 +2570,11 @@ impl Cycle<'_, '_> {
             }
         }
         self.retry_queued(&mut responding, max_per_cycle);
+        // Said once per cause, even when the notice reaches no one: a retry the next cycle would repeat it to
+        // whoever it did reach, and the error is in the cycle summary and `status`.
         if let Some(entry) = self.queue.stuck(now)
             && let Err(e) = send(notify, &retry::stuck_notice(&entry, self.queue.entries.len()))
         {
-            self.queue.blocked_told = None;
             record_error(config, &mut self.summary, "responder-blocked notice", &e);
         }
         let queue = &self.queue;

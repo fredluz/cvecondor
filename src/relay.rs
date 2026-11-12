@@ -419,6 +419,7 @@ fn build_prompt(config: &Config, token: &str, workdir: &Path, at: &str, incoming
 /// Creates the work dir (`prompt.md`, `AGENTS.md`) and the agent's argv and environment for one message.
 fn build_job(config: &Config, token: &str, incoming: &Incoming, at: &str, base: &Env) -> Result<RelayJob> {
     let r = config.responder.as_ref().ok_or_else(|| anyhow!("no responder configured"))?;
+    crate::responder::check_env(config)?;
     let workdir = create_workdir(config, at)?;
     let prompt = build_prompt(config, token, &workdir, at, incoming);
     let prompt_file = workdir.join("prompt.md");

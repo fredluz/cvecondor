@@ -27,6 +27,7 @@ services:
     container_name: cvecondor          # the docs' command prefix: `docker exec cvecondor cvecondor …`
     build: ..
     restart: unless-stopped
+    init: true                         # reaps the git and agent processes the responder leaves behind; without it they pile up as zombies
     volumes:
       - ${CVECONDOR_CONFIG_DIR:?set CVECONDOR_CONFIG_DIR to the config dir (config.json + cvecondor.env), outside the checkout}:/config:ro
       - cvecondor-data:/data
