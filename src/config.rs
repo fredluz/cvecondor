@@ -422,6 +422,13 @@ pub struct Config {
     pub secret_env: Vec<String>,
 }
 
+/// The names in `responder.env` whose value is empty, never the values: an agent started with one has nothing to
+/// authenticate with (`"GH_TOKEN": ""` is what a `"${GITHUB_TOKEN}"` placeholder becomes when a shell expands it
+/// while the config is edited).
+pub fn empty_responder_env(config: &Config) -> Vec<String> {
+    config.responder.iter().flat_map(|r| &r.env).filter(|(_, value)| value.trim().is_empty()).map(|(name, _)| name.clone()).collect()
+}
+
 /// The responder's brief files, compiled in: a lone binary still has them.
 pub const SHIPPED_BRIEF_FILES: &[(&str, &str)] = &[
     ("common.md", include_str!("../agent/respond/common.md")),
@@ -824,7 +831,8 @@ impl Interpolator<'_> {
                     let whole = c.get(0).expect("whole match");
                     let name = &c[1];
                     out.push_str(&s[last..whole.start()]);
-                    let resolved = self.env.get(name).filter(|v| !v.is_empty()).ok_or_else(|| anyhow!("{at}: environment variable {name} is not set"))?;
+                    let why = if self.env.contains_key(name) { "empty" } else { "not set" };
+                    let resolved = self.env.get(name).filter(|v| !v.is_empty()).ok_or_else(|| anyhow!("{at}: environment variable {name} is {why}"))?;
                     self.add_secret_env(name);
                     if resolved.encode_utf16().count() >= 6 {
                         self.add_secret(resolved);
@@ -1212,7 +1220,8 @@ mod tests {
         let raw = json!({ "collectors": [{ "type": "github", "token": "${GITHUB_TOKEN}" }] });
         let err = build(raw.clone(), &env(&[])).expect_err("unset variable").to_string();
         assert_eq!(err, "config.collectors[0].token: environment variable GITHUB_TOKEN is not set");
-        assert!(build(raw.clone(), &env(&[("GITHUB_TOKEN", "")])).is_err(), "an empty variable is not a credential");
+        let empty = build(raw.clone(), &env(&[("GITHUB_TOKEN", "")])).expect_err("empty variable").to_string();
+        assert_eq!(empty, "config.collectors[0].token: environment variable GITHUB_TOKEN is empty", "an empty variable is not a credential");
         let config = build(raw, &env(&[("GITHUB_TOKEN", "github_pat_11ABCDEFG0123456789_secretvalue")])).expect("builds");
         let CollectorConfig::Github(github) = &config.collectors[0] else { panic!("a github collector") };
         assert_eq!(github.token, "github_pat_11ABCDEFG0123456789_secretvalue");

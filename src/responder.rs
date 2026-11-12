@@ -21,14 +21,15 @@ use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
 
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, bail};
 use indexmap::{IndexMap, IndexSet};
 use regex::Regex;
 
-use crate::config::{Agent, Config, Env, Mode, NotifyEvent, SHIPPED_BRIEF_FILES, process_env, read_brief, redact, shipped_brief};
+use crate::config::{Agent, Config, empty_responder_env, Env, Mode, NotifyEvent, SHIPPED_BRIEF_FILES, process_env, read_brief, redact, shipped_brief};
 use crate::fixes::parse_waits;
 use crate::name::{ENV_PREFIX, NAME};
 use crate::notify::{Notice, Notifier};
+use crate::retry::{NO_REPORT, REPORT_INCOMPLETE, UNFINISHED_SAYS};
 use crate::state::{read_state, slug, write_file_atomic, write_state};
 use crate::upstream::parse_fixed;
 use crate::util::{self, iso};
@@ -295,6 +296,23 @@ pub fn responder_env(config: &Config, base: &Env, extra: &[(String, String)]) ->
         env.insert(key.clone(), value.clone());
     }
     env.into_iter().collect()
+}
+
+/// An error naming each `responder.env` variable that is empty, so no run starts that could not authenticate. It is the
+/// same cause for every case, which the retry queue says once; `status` and the daemon's start say it first.
+pub fn check_env(config: &Config) -> Result<()> {
+    let empty = empty_responder_env(config);
+    if empty.is_empty() {
+        return Ok(());
+    }
+    bail!("{}", empty_env_text(&empty));
+}
+
+/// `responder.env.GH_TOKEN is empty: ...`, for `status`, the start-up log and the run that did not start.
+pub fn empty_env_text(names: &[String]) -> String {
+    let list = names.iter().map(|n| format!("responder.env.{n}")).collect::<Vec<_>>().join(", ");
+    let verb = if names.len() == 1 { "is" } else { "are" };
+    format!("{list} {verb} empty, so the agent would start with no credential for it: put the value in the env file and reference it as \"${{NAME}}\" (a shell expands \"${{NAME}}\" to nothing when it edits the config)")
 }
 
 /// What a child's stdout has produced so far; shared with the thread that reads it, so a reader still blocked on a
@@ -612,6 +630,7 @@ pub fn start_response(config: &Config, c: &Case, case_file: &Path, mode: Mode, n
 /// one-liners.
 pub fn start_response_with(config: &Config, c: &Case, case_file: &Path, mode: Mode, notify: Notifier, options: &StartOptions) -> Result<()> {
     let r = config.responder.as_ref().ok_or_else(|| anyhow!("no responder configured"))?;
+    check_env(config)?;
     let started_at = iso(util::now());
     let stamp: String = started_at.chars().filter(char::is_ascii_digit).take(14).collect();
     let workdir = config.state_dir.join("work").join(format!("{}-{stamp}", slug(&c.key)));
@@ -805,7 +824,7 @@ impl Job {
         record.triage = triage.clone();
         if !ok {
             let program = self.argv.first().map_or("", String::as_str);
-            let reason = failure_reason(&ran, &stdout, program, self.timeout, has_report, unfinished);
+            let reason = failure_reason(&ran, &stdout, program, self.timeout, has_report, unfinished.as_deref());
             record.error = Some(slice_utf16(&redact(config, &reason), 300).to_string());
         }
         record.urgent = told.clone();
@@ -846,19 +865,19 @@ impl Job {
 
 /// Why a finished-looking run is not finished, or `None` when its report is: `report.md` holds a `## Message` section
 /// that does not open with `Unfinished`.
-fn unfinished(report: &str) -> Option<&'static str> {
+fn unfinished(report: &str) -> Option<String> {
     static HEAD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?m)^##\s*Message\s*$").expect("valid regex"));
     if report.trim().is_empty() {
-        return Some("ended without writing report.md");
+        return Some(NO_REPORT.to_string());
     }
     if !HEAD.is_match(report) {
-        return Some("ended before its report was finished (report.md has no `## Message`)");
+        return Some(format!("{REPORT_INCOMPLETE} (report.md has no `## Message`)"));
     }
     let message = message_of(report);
     if message.trim().is_empty() {
-        return Some("ended before its report was finished (an empty `## Message`)");
+        return Some(format!("{REPORT_INCOMPLETE} (an empty `## Message`)"));
     }
-    message.trim_start().get(..10).is_some_and(|w| w.eq_ignore_ascii_case("unfinished")).then_some("its report says it is unfinished")
+    message.trim_start().get(..10).is_some_and(|w| w.eq_ignore_ascii_case("unfinished")).then(|| UNFINISHED_SAYS.to_string())
 }
 
 /// Why a run did not finish: how it ended, and what the agent said about it.

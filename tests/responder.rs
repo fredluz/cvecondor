@@ -87,6 +87,28 @@ printf '## Message\nPinned left-pad via an override; waiting for 1.0.1.\n\n## De
 }
 
 #[test]
+fn an_empty_responder_env_value_stops_the_run_naming_the_variable_and_never_starts_the_agent() {
+    let dir = TempDir::new("cvecondor-responder");
+    let ran = dir.path().join("ran");
+    let agent = dir.path().join("fake-agent.sh");
+    fs::write(&agent, format!("touch '{}'\n", ran.display())).expect("writes the agent");
+    let env: Env = [("GITHUB_TOKEN".to_string(), "ghp_unused_value".to_string())].into();
+    let config = config_in(&dir, json!({ "command": ["sh", agent], "env": { "GH_TOKEN": "", "OTHER": "set" } }), &env);
+    assert_eq!(cvecondor::config::empty_responder_env(&config), ["GH_TOKEN"]);
+
+    let c = case("CVE-2026-2", "pending", &dir.path().join("reports").join("r.md"));
+    let case_file = dir.path().join("case.json");
+    fs::write(&case_file, "{}").expect("writes the case");
+    let err = start_response_with(&config, &c, &case_file, Mode::Propose, recorder().notifier(), &StartOptions { env: Some(&env), ..StartOptions::default() })
+        .expect_err("a run with no credential does not start");
+    let text = err.to_string();
+    assert!(text.contains("responder.env.GH_TOKEN is empty") && !text.contains("OTHER"), "{text}");
+    assert!(!text.contains("ghp_unused_value"), "never a value");
+    assert!(!ran.exists(), "the agent was not started");
+    assert!(read_state::<ResponseRecord>(dir.path(), "responses/cve-2026-2.json").is_none(), "no run is recorded");
+}
+
+#[test]
 fn the_responders_triage_is_recorded_on_the_case_and_an_unknown_path_is_left_out() {
     let dir = TempDir::new("cvecondor-responder");
     let agent = dir.path().join("fake-agent.sh");
