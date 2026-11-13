@@ -11,4 +11,4 @@ Every TLS client that trusts the CA is a place, not only the lines the watcher l
 
 Name the roots by name and SHA-256 fingerprint from the advisory. In the report, one table lists each place, its store, whether it still trusts them, and its fix. Certificates of the user's own that the CA issued need reissuing too: check them.
 
-What you may run follows the mode (`common.md`): fixed releases are updates (`update.md`'s rules: one branch and pull request per repo, tests, the old image kept); removing roots by hand is a workaround, done only in mode ACT; everything else is proposed. Declare waits for the stores whose fixed release hasn't shipped.
+What you may run follows the mode (`common.md`): fixed releases are updates (`update.md`'s rules: one branch and pull request per repo, tests, the old image kept; the pull request and branch say only which bundle or package moves to which version, never which CA or why, per `common.md`, "What you write into a repo"); removing roots by hand is a workaround, done only in mode ACT; everything else is proposed. Declare waits for the stores whose fixed release hasn't shipped.

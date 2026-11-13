@@ -30,4 +30,5 @@ pub mod util;
 pub mod upstream;
 pub mod vendors;
 pub mod versions;
+pub mod visibility;
 pub mod watch;
