@@ -107,6 +107,12 @@ impl Page<'_> {
         esc(&redact(self.config, text))
     }
 
+    /// The same, at most `n` characters. Scrubbed before it is cut: a secret value split by the cut would no longer
+    /// match as a whole and its first characters would show.
+    fn tc(&self, text: &str, n: usize) -> String {
+        esc(&clip(&redact(self.config, text), n))
+    }
+
     fn code(&self, text: &str) -> String {
         format!("<code>{}</code>", self.t(text))
     }
@@ -140,7 +146,7 @@ impl Page<'_> {
     /// How serious a case is for the user, in words: the responder's rating when it gave one, else the watcher's first.
     fn rating(&self, c: &Case) -> String {
         match (c.triage.as_ref().and_then(|t| t.rating.as_deref()).filter(|r| !r.is_empty()), c.assessment.as_ref()) {
-            (Some(r), _) => clip(r, 60),
+            (Some(r), _) => clip(&redact(self.config, r), 60),
             (None, Some(a)) => a.rating.as_str().to_string(),
             (None, None) => "unrated".to_string(),
         }
@@ -148,7 +154,7 @@ impl Page<'_> {
 
     fn case(&self, c: &Case, overview: &Overview) -> String {
         let status = c.status();
-        let mut out = format!("<article>\n<h3><strong>{}</strong> {} {}</h3>\n", self.t(&self.rating(c)), self.code(&c.key), self.t(&clip(&c.title, 200)));
+        let mut out = format!("<article>\n<h3><strong>{}</strong> {} {}</h3>\n", self.t(&self.rating(c)), self.code(&c.key), self.tc(&c.title, 200));
         let state = match status {
             CaseStatus::Waiting => c.status_reason().map_or_else(|| "waiting".to_string(), |r| format!("waiting on {}: {}", r.as_str(), c.status_detail())),
             _ => format!("{}, {}", status.as_str(), c.state.as_str()),
@@ -247,7 +253,7 @@ impl Page<'_> {
                     vec![
                         self.code(&c.key),
                         self.t(&c.status_reason().map_or_else(|| "closed".to_string(), |r| r.as_str().to_string())),
-                        self.t(&clip(&c.title, 120)),
+                        self.tc(&c.title, 120),
                         self.t(handled_text(c).trim().trim_matches(['(', ')'])),
                         self.t(&ago(Some(&c.updated_at))),
                     ]
@@ -474,7 +480,7 @@ impl Page<'_> {
                 let file = Path::new(&e.file);
                 // The file's name when it lives under reports/ (the usual), else the path as kept.
                 let shown = file.strip_prefix(&reports).ok().and_then(Path::to_str).unwrap_or(&e.file);
-                vec![self.t(&e.at), self.t(&e.event), self.t(&clip(&e.title, 200)), self.code(shown)]
+                vec![self.t(&e.at), self.t(&e.event), self.tc(&e.title, 200), self.code(shown)]
             })
             .collect();
         out.push_str(&self.table(&["At", "Event", "Title", "File"], &rows));
@@ -547,6 +553,10 @@ fn problems(config: &Config, overview: &Overview) -> Vec<String> {
         if down > 0 {
             problems.push(format!("{down} service(s) down"));
         }
+    }
+    let relays = config.notify.iter().filter(|n| crate::relay::replies_failing(config, n)).count();
+    if relays > 0 {
+        problems.push(format!("{relays} Telegram reply reader(s) failing"));
     }
     if !overview.queue.entries.is_empty() {
         problems.push(format!("{} case(s) in the retry queue", overview.queue.entries.len()));

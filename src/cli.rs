@@ -1273,9 +1273,8 @@ fn run(args: Vec<OsString>) -> Result<i32> {
         "status" => say(&status(&config, opts.closed)?),
         "dashboard" => match &opts.out {
             Some(out) => {
-                write_private(Path::new(out), &crate::dashboard::render(&config))?;
-                // The mode only applies when the file is created: an older, wider one is narrowed too.
-                fs::set_permissions(out, std::os::unix::fs::PermissionsExt::from_mode(0o600)).with_context(|| format!("chmod {out}"))?;
+                // A new private file renamed over the path: an older, wider file is replaced, never written into.
+                crate::state::write_file_atomic(Path::new(out), &crate::dashboard::render(&config))?;
                 say(&format!("wrote {out}"));
             }
             None => {

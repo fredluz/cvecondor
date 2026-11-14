@@ -214,7 +214,11 @@ fn a_secret_shows_its_name_and_fingerprint_but_no_value_the_watcher_knows() {
     // A "fingerprint" that is not 8 hex is not shown at all.
     inv.secrets[1].fingerprint = Some(TOKEN.to_string());
     write_state(dir.path(), "inventory.json", &inv).expect("writes");
+    // A value that straddles where a title is cut is scrubbed before the cut, so none of it shows.
+    cases["CVE-2026-1111"]["title"] = json!(format!("{}{TOKEN}", "x".repeat(190)));
+    write_state(dir.path(), "cases.json", &cases).expect("writes");
     let html = render(&config_in(dir.path()));
+    assert!(!html.contains(&TOKEN[..8]), "the start of a value cut by the title's limit reached the page");
     assert!(!html.contains(TOKEN), "a value reached the page");
     assert!(!html.contains(&TOKEN[..20]), "part of a value reached the page");
     assert!(html.contains("[redacted]"), "{html}");
@@ -259,10 +263,16 @@ fn the_command_prints_the_page_or_writes_it_privately_and_never_touches_the_stat
     assert_eq!(fs::metadata(&file).expect("the file").permissions().mode() & 0o777, 0o600);
     assert!(fs::read_to_string(&file).expect("reads").contains("<h2>Cases</h2>"));
 
-    // An older, wider file is narrowed.
+    // An older, wider file is replaced by a private one, never written into: whoever holds the old file (here a hard
+    // link to it) still sees the old content.
     fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).expect("chmod");
+    let old = dir.path().join("old-link.html");
+    fs::hard_link(&file, &old).expect("links");
+    fs::write(&file, "old").expect("writes");
     assert!(run_dashboard(&state, &["--out", &file.display().to_string()]).status.success());
     assert_eq!(fs::metadata(&file).expect("the file").permissions().mode() & 0o777, 0o600);
+    assert!(fs::read_to_string(&file).expect("reads").contains("<h2>Cases</h2>"));
+    assert_eq!(fs::read_to_string(&old).expect("reads"), "old");
 
     assert_eq!(snapshot(&state), before, "the state dir changed");
     assert!(!state.join("inbox-read.json.bad").exists() && !state.join("known.json.bad").exists());
@@ -292,4 +302,29 @@ fn a_watcher_that_cycled_just_now_with_nothing_failing_is_healthy() {
     let html = render(&config_in(dir.path()));
     assert!(html.contains("<strong>Healthy.</strong> Last cycle just now"), "{html}");
     assert!(!html.contains("Needs attention") && !html.contains("Nothing yet"), "{html}");
+}
+
+#[test]
+fn a_telegram_reply_reader_that_fails_is_not_healthy() {
+    let dir = TempDir::new("cvecondor-dash-relay");
+    let bot = "123456:dash-bot-token";
+    let raw = json!({ "stateDir": dir.path(), "classifier": false, "collectors": [{ "type": "github", "token": "${DASH_TOKEN}" }],
+                      "responder": { "agent": "claude" },
+                      "notify": [{ "type": "telegram", "botToken": "${DASH_BOT}", "chatId": "42", "replies": true }] });
+    let env: Env = [("DASH_TOKEN".to_string(), TOKEN.to_string()), ("DASH_BOT".to_string(), bot.to_string())].into();
+    let config = build_config(&raw, &dir.path().join("config.json"), &env).expect("the config builds");
+    let at = cvecondor::util::iso(cvecondor::util::now());
+    write_state(
+        dir.path(),
+        "last-cycle.json",
+        &json!({ "at": at, "polled": 3, "fresh": 0, "firstRead": 0, "osvQueried": [], "newCases": [], "dispatched": [], "reopened": [], "secretsTold": 0, "vendors": 0, "errors": [], "durationMs": 5 }),
+    )
+    .expect("writes the cycle");
+    write_state(dir.path(), "feeds.json", &json!({ "cert-eu": { "okAt": at } })).expect("writes the feeds");
+    // The relay polls apart from the cycle: its failure is only in its own file, never in last-cycle.json.
+    let seen = format!("relay-{}-seen.json", &cvecondor::util::sha256_hex(bot.as_bytes())[..8]);
+    write_state(dir.path(), &seen, &json!({ "polledAt": at, "error": "HTTP 401" })).expect("writes the relay state");
+    let html = render(&config);
+    assert!(html.contains("Needs attention:</span> 1 Telegram reply reader(s) failing"), "{html}");
+    assert!(!html.contains("<strong>Healthy.</strong>") && !html.contains(bot), "{html}");
 }

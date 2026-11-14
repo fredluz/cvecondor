@@ -300,6 +300,12 @@ pub fn status_text(config: &Config, notifier: &NotifierConfig, now: Timestamp) -
     })
 }
 
+/// Whether this notifier reads replies and its last poll failed (what `status_text` reports as FAILING).
+pub fn replies_failing(config: &Config, notifier: &NotifierConfig) -> bool {
+    let NotifierKind::Telegram { bot_token, replies: true, .. } = &notifier.kind else { return false };
+    read_state::<Seen>(&config.state_dir, &seen_file(bot_token)).is_some_and(|seen| seen.error.is_some())
+}
+
 /// One incoming text, with what the answer needs to point back at it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Incoming {
