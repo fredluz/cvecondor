@@ -328,3 +328,28 @@ fn a_telegram_reply_reader_that_fails_is_not_healthy() {
     assert!(html.contains("Needs attention:</span> 1 Telegram reply reader(s) failing"), "{html}");
     assert!(!html.contains("<strong>Healthy.</strong>") && !html.contains(bot), "{html}");
 }
+
+#[test]
+fn a_secret_cut_by_the_rating_or_inbox_or_closed_title_limit_leaves_no_start_of_it() {
+    let dir = TempDir::new("cvecondor-dash-cut");
+    seed(dir.path());
+    let mut cases: IndexMap<String, Value> = serde_json::from_str(&fs::read_to_string(dir.path().join("cases.json")).expect("reads")).expect("parses");
+    // The rating is cut at 60, a closed case's title at 120.
+    cases["GHSA-aaaa-bbbb-cccc"]["triage"]["rating"] = json!(format!("{}{TOKEN}", "r".repeat(52)));
+    cases["CVE-2026-0001"]["title"] = json!(format!("{}{TOKEN}", "c".repeat(105)));
+    write_state(dir.path(), "cases.json", &cases).expect("writes");
+    // An inbox title is cut at 200.
+    let notice = Notice {
+        event: NotifyEvent::Case,
+        title: format!("{}{TOKEN}", "i".repeat(190)),
+        text: "details".to_string(),
+        key: None,
+        severity: None,
+        urls: None,
+        report_path: None,
+    };
+    keep(dir.path(), &notice, parse_time("2026-10-21T08:07:00.000Z").expect("a time")).expect("keeps");
+    let html = render(&config_in(dir.path()));
+    assert!(!html.contains(&TOKEN[..8]), "the start of a value cut by a limit reached the page");
+    assert!(html.contains("[redacted]"), "{html}");
+}
