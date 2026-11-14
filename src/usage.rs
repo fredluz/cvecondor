@@ -163,8 +163,13 @@ pub fn parse_claude(stdout: &str) -> Option<(String, Usage)> {
     if v.get("type")?.as_str()? != "result" {
         return None;
     }
-    // An error result without text has none: the answer is empty, as a CLI that printed nothing.
-    let text = v.get("result").and_then(Value::as_str).unwrap_or_default().to_string();
+    // An error result without text says why in `errors` (strings): that becomes the text, so the retry queue still reads
+    // the cause (a usage limit, a login) the way it read it from the plain-text output. Nothing at all: empty, as a CLI
+    // that printed nothing.
+    let text = match v.get("result").and_then(Value::as_str).filter(|t| !t.trim().is_empty()) {
+        Some(t) => t.to_string(),
+        None => v.get("errors").and_then(Value::as_array).map(|e| e.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("\n")).unwrap_or_default(),
+    };
     let mut usage = Usage { source: Format::ClaudeJson, subagents: Some(true), ..Usage::default() };
     let mut cost: Option<f64> = None;
     if let Some(models) = v.get("modelUsage").and_then(Value::as_object) {
@@ -387,6 +392,15 @@ mod tests {
         assert_eq!((usage.input, usage.cache_read, usage.cache_write, usage.output), (Some(1176 + 21770 + 16212), Some(21770), Some(16212), Some(20)));
         assert_eq!((usage.cost_usd, usage.models.as_slice(), usage.subagents), (Some(0.0035877), ["claude-haiku-5-5".to_string()].as_slice(), Some(true)));
         assert_eq!(usage.reasoning, None, "not reported is unknown, not 0");
+    }
+
+    #[test]
+    fn a_claude_error_result_without_text_gives_its_errors_as_the_text() {
+        let out = r#"{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["Claude AI usage limit reached, resets 7:40pm (UTC)"],"modelUsage":{}}"#;
+        let (text, usage) = parse_claude(out).expect("parses");
+        assert_eq!(text, "Claude AI usage limit reached, resets 7:40pm (UTC)");
+        assert!(!usage.is_known());
+        assert_eq!(parse_claude(r#"{"type":"result","is_error":true}"#).expect("parses").0, "");
     }
 
     #[test]
