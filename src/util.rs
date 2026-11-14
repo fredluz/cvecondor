@@ -97,7 +97,8 @@ static RFC2822_TIME: LazyLock<Regex> = LazyLock::new(|| {
 
 /// An optional weekday name, then `Oct 21, 2026` / `October 21 2026` (comma optional).
 static MONTH_FIRST_TIME: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(&format!(r"(?i)^(?:[a-z]{{3,9}}(?:,\s*|\s+))?(?P<mon>[a-z]{{3,9}})\.?\s+(?P<d>[0-9]{{1,2}}),?\s+(?P<y>[0-9]{{4}}){NAMED_TAIL}")).expect("valid regex")
+    Regex::new(&format!(r"(?i)^(?:[a-z]{{3,9}}(?:,\s*|\s+))?(?P<mon>[a-z]{{3,9}})\.?\s+(?P<d>[0-9]{{1,2}}),?\s+(?P<y>[0-9]{{4}}){NAMED_TAIL}"))
+        .expect("valid regex")
 });
 
 const MONTHS: [&str; 12] = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
@@ -621,8 +622,11 @@ mod tests {
     fn run_signals_the_whole_process_group_on_timeout() {
         // `sleep` is a grandchild of the program `run` started: it must not outlive the run.
         let started = Instant::now();
-        let out = run(&["sh".into(), "-c".into(), "sleep 30 & echo $!; wait".into()], &RunOptions { timeout: Some(Duration::from_millis(300)), ..Default::default() })
-            .expect("sh runs");
+        let out = run(
+            &["sh".into(), "-c".into(), "sleep 30 & echo $!; wait".into()],
+            &RunOptions { timeout: Some(Duration::from_millis(300)), ..Default::default() },
+        )
+        .expect("sh runs");
         assert!(out.timed_out);
         assert!(started.elapsed() < Duration::from_secs(8));
         let grandchild: i32 = String::from_utf8_lossy(&out.stdout).trim().parse().expect("the grandchild pid");

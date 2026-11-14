@@ -1,4 +1,4 @@
-# Tests and lints on Linux and macOS for every push and pull request. The tests need no network beyond crates.io:
+# Tests, format and lints on Linux and macOS for every push and pull request. The tests need no network beyond crates.io:
 # feeds, GitHub and registries are faked; tests that need gitleaks skip themselves when it is missing.
 name: ci
 on:
@@ -22,8 +22,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Rust toolchain
-        run: rustup toolchain install stable --profile minimal --component clippy && rustup default stable
+        run: rustup toolchain install stable --profile minimal --component clippy --component rustfmt && rustup default stable
       - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --check
       - name: Test
         run: cargo test --locked
       - name: Clippy

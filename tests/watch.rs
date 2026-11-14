@@ -1358,7 +1358,6 @@ fn an_update_without_a_pull_request_waits_on_the_inventory() {
 
 // ---------- A service that is down ----------
 
-
 /// A config whose collectors are a GitHub one plus a `service-state` file at `path` (fresh for the fixture clock).
 fn state_config(path: &Path) -> Value {
     json!({ "collectors": [{ "type": "github", "token": "ghp_unused" }, { "type": "service-state", "file": path }] })
@@ -1426,7 +1425,12 @@ fn a_case_waits_on_a_down_service_and_returns_to_its_wait_when_it_is_back() {
     let config = test_config(extra);
     write_state(&config.state_dir, "inventory.json", &inventory()).expect("writes the inventory");
     let h = Harness {
-        config, net: shared(net), rec: recorder(), responded: Arc::default(), runs: Arc::default(), clock: AtomicI64::new(parse_time("2026-10-21T08:00:00Z").expect("a time").as_millisecond()),
+        config,
+        net: shared(net),
+        rec: recorder(),
+        responded: Arc::default(),
+        runs: Arc::default(),
+        clock: AtomicI64::new(parse_time("2026-10-21T08:00:00Z").expect("a time").as_millisecond()),
     };
     h.put_case(api_case(json!({ "state": "handled", "handledBy": "responder", "handledAt": "2026-10-20T10:00:00Z", "targets": ["github repo:acme/api left-pad 1.0.0 (package-lock.json)"] })));
     // A run that already finished: the fix PR is open, the case waits on the merge.
@@ -1441,11 +1445,7 @@ fn a_case_waits_on_a_down_service_and_returns_to_its_wait_when_it_is_back() {
     assert_eq!((c.status(), c.status_reason()), (CaseStatus::Waiting, Some(StatusReason::Service)), "{c:?}");
     assert_eq!(c.service, Some(cvecondor::service::ServiceState::Down), "{c:?}");
     assert_eq!(c.status_detail(), "the service to come back");
-    assert_eq!(
-        c.service_prior.as_ref().map(|p| (p.status, p.reason)),
-        Some((CaseStatus::Waiting, StatusReason::User)),
-        "the wait it covers for: {c:?}"
-    );
+    assert_eq!(c.service_prior.as_ref().map(|p| (p.status, p.reason)), Some((CaseStatus::Waiting, StatusReason::User)), "the wait it covers for: {c:?}");
     assert!(c.pull_requests.as_deref().is_some_and(|prs| prs.len() == 1), "the open PR stays on the case: {c:?}");
 
     // The service comes back: the case returns to its merge wait — no dispatch, no urgent line.
@@ -1469,7 +1469,11 @@ fn api_service_harness() -> (Harness, common::TempDir) {
     let config = test_config(extra);
     write_state(&config.state_dir, "inventory.json", &inventory()).expect("writes the inventory");
     let h = Harness {
-        config, net: shared(Net::new("2026-10-20T00:00:00Z")), rec: recorder(), responded: Arc::default(), runs: Arc::default(),
+        config,
+        net: shared(Net::new("2026-10-20T00:00:00Z")),
+        rec: recorder(),
+        responded: Arc::default(),
+        runs: Arc::default(),
         clock: AtomicI64::new(parse_time("2026-10-21T08:12:00Z").expect("a time").as_millisecond()),
     };
     (h, dir)
@@ -1525,7 +1529,11 @@ fn a_down_service_is_never_called_exploitable_but_still_gets_its_fix() {
     let config = test_config(extra);
     write_state(&config.state_dir, "inventory.json", &inventory()).expect("writes the inventory");
     let h = Harness {
-        config, net: shared(Net::new("2026-10-20T00:00:00Z")), rec: recorder(), responded: Arc::default(), runs: Arc::default(),
+        config,
+        net: shared(Net::new("2026-10-20T00:00:00Z")),
+        rec: recorder(),
+        responded: Arc::default(),
+        runs: Arc::default(),
         clock: AtomicI64::new(parse_time("2026-10-21T08:00:00Z").expect("a time").as_millisecond()),
     };
     h.cycle(); // baseline: what the feeds already carry is not news
@@ -1561,7 +1569,11 @@ fn an_unknown_service_is_treated_as_running() {
     let config = test_config(extra); // the file is never written
     write_state(&config.state_dir, "inventory.json", &inventory()).expect("writes the inventory");
     let h = Harness {
-        config, net: shared(Net::new("2026-10-20T00:00:00Z")), rec: recorder(), responded: Arc::default(), runs: Arc::default(),
+        config,
+        net: shared(Net::new("2026-10-20T00:00:00Z")),
+        rec: recorder(),
+        responded: Arc::default(),
+        runs: Arc::default(),
         clock: AtomicI64::new(parse_time("2026-10-21T08:00:00Z").expect("a time").as_millisecond()),
     };
     h.put_case(api_case(json!({ "state": "handled", "handledBy": "responder", "handledAt": "2026-10-20T10:00:00Z" })));
@@ -1590,10 +1602,12 @@ fn the_services_list_marks_what_the_state_file_cannot_see() {
     let file = dir.path().join("service-state.json");
     std::fs::write(&file, json!({ "generatedAt": "2026-10-21T08:00:00Z", "containers": [] }).to_string()).expect("writes the state file");
     let mut extra = state_config(&file);
-    extra
-        .as_object_mut()
-        .expect("an object")
-        .extend(json!({ "services": [ { "repo": "acme/blog", "deployed": false, "note": "moved off the server" }, { "repo": "acme/api", "running": false } ] }).as_object().expect("an object").clone());
+    extra.as_object_mut().expect("an object").extend(
+        json!({ "services": [ { "repo": "acme/blog", "deployed": false, "note": "moved off the server" }, { "repo": "acme/api", "running": false } ] })
+            .as_object()
+            .expect("an object")
+            .clone(),
+    );
     let config = test_config(extra);
     let inventory = inventory();
     let states = cvecondor::service::service_states(&config, &inventory, parse_time("2026-10-21T08:06:00Z").expect("a time"));
@@ -1631,12 +1645,14 @@ fn an_explicit_running_true_beats_the_state_file() {
     let file = dir.path().join("service-state.json");
     std::fs::write(&file, json!({ "generatedAt": "2026-10-21T08:00:00Z", "containers": api_stopped() }).to_string()).expect("writes the state file");
     let mut extra = state_config(&file);
-    extra
-        .as_object_mut()
-        .expect("an object")
-        .extend(json!({ "services": [
+    extra.as_object_mut().expect("an object").extend(
+        json!({ "services": [
             { "repo": "acme/api", "project": "api", "running": true, "note": "prod runs elsewhere; this box is a retired deploy" }
-        ] }).as_object().expect("an object").clone());
+        ] })
+        .as_object()
+        .expect("an object")
+        .clone(),
+    );
     let config = test_config(extra);
     let inventory = inventory();
     let states = cvecondor::service::service_states(&config, &inventory, parse_time("2026-10-21T08:06:00Z").expect("a time"));
@@ -1644,7 +1660,10 @@ fn an_explicit_running_true_beats_the_state_file() {
     assert_eq!(states["acme/api"].detail, "prod runs elsewhere; this box is a retired deploy");
     // Without the flag, the same file marks the same project down.
     let mut plain = state_config(&file);
-    plain.as_object_mut().expect("an object").extend(json!({ "services": [ { "repo": "acme/api", "project": "api" } ] }).as_object().expect("an object").clone());
+    plain
+        .as_object_mut()
+        .expect("an object")
+        .extend(json!({ "services": [ { "repo": "acme/api", "project": "api" } ] }).as_object().expect("an object").clone());
     let states = cvecondor::service::service_states(&test_config(plain), &inventory, parse_time("2026-10-21T08:06:00Z").expect("a time"));
     assert_eq!(states["acme/api"].state, Some(cvecondor::service::ServiceState::Down), "{states:?}");
 }
@@ -1695,7 +1714,11 @@ fn an_advisory_already_judged_at_this_version_and_exposure_spawns_nothing_when_i
 #[test]
 fn a_returning_advisory_is_judged_again_when_the_version_exploitation_or_a_fix_changed() {
     let judged_at_another_version = json!({ "judged": { "at": "2026-10-20T10:00:00Z", "items": [{ "host": "github", "where": "repo:acme/api", "name": "left-pad", "version": "0.9.0" }] } });
-    for (what, extra) in [("the installed version changed", judged_at_another_version), ("exploited in the wild", json!({ "exploited": true })), ("a fix shipped", json!({ "fixAvailable": true }))] {
+    for (what, extra) in [
+        ("the installed version changed", judged_at_another_version),
+        ("exploited in the wild", json!({ "exploited": true })),
+        ("a fix shipped", json!({ "fixAvailable": true })),
+    ] {
         let h = Harness::new(Net::new("2026-10-20T00:00:00Z"), claude());
         h.put_case(judged_case(extra));
         h.cycle();
@@ -1749,16 +1772,17 @@ fn a_new_advisory_on_an_already_judged_package_is_judged_with_the_earlier_verdic
     let responded = h.responded();
     assert_eq!(responded.len(), 1, "the new advisory is judged");
     assert_eq!(responded[0].0.key, "CVE-2026-9001");
-    let file: Value = read_state(
-        cvecondor::watch::case_path(&h.config.state_dir, "CVE-2026-9001").parent().expect("a dir"),
-        &format!("{}.json", slug("CVE-2026-9001")),
-    )
-    .expect("the case file");
+    let file: Value =
+        read_state(cvecondor::watch::case_path(&h.config.state_dir, "CVE-2026-9001").parent().expect("a dir"), &format!("{}.json", slug("CVE-2026-9001")))
+            .expect("the case file");
     let earlier = file["related"].as_array().expect("related").iter().find(|r| r["key"] == "CVE-2026-9000").expect("the earlier case is related");
     assert_eq!(earlier["verdict"]["path"], "not-exploitable");
     assert_eq!(earlier["verdict"]["why"], "the vulnerable function is never called");
     assert_eq!(earlier["report"], "/data/reports/earlier.md", "the evidence");
-    assert_eq!(earlier["judgedAt"], json!([{ "host": "github", "where": "repo:acme/api", "package": "left-pad", "version": "1.0.0", "exposure": "", "unchangedSince": true }]));
+    assert_eq!(
+        earlier["judgedAt"],
+        json!([{ "host": "github", "where": "repo:acme/api", "package": "left-pad", "version": "1.0.0", "exposure": "", "unchangedSince": true }])
+    );
 }
 
 /// Advisories pending on one place at once are judged by one response, across cycles too: a backlog the responder
@@ -1825,7 +1849,8 @@ fn an_advisory_reaching_a_new_place_is_judged_there_once() {
     assert_eq!(h.cases()["CVE-2026-9000"].status(), CaseStatus::Waiting);
 
     // The inventory is refreshed: the same package now also sits in another repo. The advisory itself is unchanged.
-    write_state(&h.config.state_dir, "inventory.json", &inventory_with(json!([npm_item("repo:acme/web", "left-pad")]), "2026-10-21T09:00:00.000Z")).expect("writes");
+    write_state(&h.config.state_dir, "inventory.json", &inventory_with(json!([npm_item("repo:acme/web", "left-pad")]), "2026-10-21T09:00:00.000Z"))
+        .expect("writes");
     h.cycle();
     let responded = h.responded();
     assert_eq!(responded.len(), 1, "the new place is judged");
@@ -1901,13 +1926,18 @@ fn a_vulnerable_version_installed_beside_a_judged_one_is_judged_when_the_advisor
 fn grouping_is_per_place_and_never_chains_advisories_through_a_shared_place() {
     let h = Harness::new(Net::new("2026-10-20T00:00:00Z"), claude());
     // left-pad is in two repos; right-pad only in `acme/api`, which they share.
-    write_state(&h.config.state_dir, "inventory.json", &inventory_with(json!([npm_item("repo:acme/web", "left-pad")]), "2026-10-21T06:00:00.000Z")).expect("writes");
+    write_state(&h.config.state_dir, "inventory.json", &inventory_with(json!([npm_item("repo:acme/web", "left-pad")]), "2026-10-21T06:00:00.000Z"))
+        .expect("writes");
     h.cycle(); // baseline
     h.net(|n| {
         n.osv_head = "2026-10-21T09:00:00Z".into();
         n.osv.insert("left-pad".into(), vec![stub("GHSA-wide", "2026-10-21T09:00:00Z")]);
         n.osv.insert("right-pad".into(), vec![stub("GHSA-one", "2026-10-21T09:00:00Z"), stub("GHSA-two", "2026-10-21T09:00:00Z")]);
-        for (id, cve, what) in [("GHSA-wide", "CVE-2026-1001", "left-pad flaw"), ("GHSA-one", "CVE-2026-1002", "right-pad flaw"), ("GHSA-two", "CVE-2026-1003", "right-pad other flaw")] {
+        for (id, cve, what) in [
+            ("GHSA-wide", "CVE-2026-1001", "left-pad flaw"),
+            ("GHSA-one", "CVE-2026-1002", "right-pad flaw"),
+            ("GHSA-two", "CVE-2026-1003", "right-pad other flaw"),
+        ] {
             n.records.insert(
                 id.into(),
                 json!({ "id": id, "modified": "2026-10-21T09:00:00Z", "aliases": [cve], "summary": what, "database_specific": high(), "affected": [] }),

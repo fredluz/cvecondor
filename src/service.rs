@@ -137,11 +137,7 @@ fn is_running(state: &str) -> bool {
 /// recorded), or the compose working directory's basename for docker-collected entries
 /// that record a path instead.
 fn project_key(service: &ServiceInfo) -> Option<String> {
-    let name = service
-        .compose
-        .as_deref()
-        .map(|p| p.trim_end_matches('/').rsplit('/').next().unwrap_or(p))
-        .filter(|p| !p.is_empty())?;
+    let name = service.compose.as_deref().map(|p| p.trim_end_matches('/').rsplit('/').next().unwrap_or(p)).filter(|p| !p.is_empty())?;
     Some(name.to_string())
 }
 
@@ -182,11 +178,9 @@ pub fn collect_state(config: &ServiceStateCollector, context: &CollectContext) -
             out.warnings.push(match read {
                 FileRead::Fresh(_) => unreachable!(),
                 FileRead::Missing => format!("{}: state file missing; services treated as unknown (running)", config.file.display()),
-                FileRead::Stale => format!(
-                    "{}: state file older than {}s; services treated as unknown (running)",
-                    config.file.display(),
-                    config.max_age().as_secs()
-                ),
+                FileRead::Stale => {
+                    format!("{}: state file older than {}s; services treated as unknown (running)", config.file.display(), config.max_age().as_secs())
+                }
                 FileRead::Unreadable(e) => format!("state file unreadable: {e}; services treated as unknown (running)"),
                 FileRead::Bad(e) => format!("{e}; services treated as unknown (running)"),
             });

@@ -276,7 +276,10 @@ fn a_response_whose_report_is_written_and_idle_is_ended_and_recorded_as_done() {
     let pidfile = dir.path().join("grandchild.pid");
     fs::write(
         &agent,
-        format!("printf '## Message\\nact this week: updated acme-api.\\n' > \"$CVECONDOR_WORKDIR/report.md\"\nsleep 60 &\necho $! > '{}'\nwait\n", pidfile.display()),
+        format!(
+            "printf '## Message\\nact this week: updated acme-api.\\n' > \"$CVECONDOR_WORKDIR/report.md\"\nsleep 60 &\necho $! > '{}'\nwait\n",
+            pidfile.display()
+        ),
     )
     .expect("writes the agent");
     let config = config_in(&dir, json!({ "command": ["sh", agent] }), &[("GITHUB_TOKEN".to_string(), "ghp_unused".to_string())].into());
@@ -360,8 +363,11 @@ fn a_case_handled_in_conversation_and_recorded_is_tracked_like_a_responder_run_e
     fs::create_dir_all(earlier.parent().expect("a reports dir")).expect("creates reports/");
     fs::write(&earlier, "the responder report\n").expect("writes the earlier report");
     let mine = state.join("mine.md");
-    fs::write(&mine, "## Message\nWorked around it; waiting for next 15.5.7.\n\n```cvecondor-wait\n{\"package\": \"npm:next\", \"atLeast\": \"15.5.7\"}\n```\n")
-        .expect("writes my report");
+    fs::write(
+        &mine,
+        "## Message\nWorked around it; waiting for next 15.5.7.\n\n```cvecondor-wait\n{\"package\": \"npm:next\", \"atLeast\": \"15.5.7\"}\n```\n",
+    )
+    .expect("writes my report");
 
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_cvecondor"))
         .args(["record", "GHSA-aaaa-bbbb-cccc", "--file"])
@@ -424,7 +430,11 @@ fi
     let done: ResponseRecord = read_state(dir.path(), "responses/q.json").expect("the record");
     assert_eq!((done.state, done.error), (ResponseState::Done, None));
     let urgent: Vec<String> = rec.notices().into_iter().filter(|n| n.event.as_str() == "urgent").map(|n| n.title).collect();
-    assert_eq!(urgent, ["Working around it on api now."], "said once across both runs; the finished retry's own act-today line is not owed either: the user was told");
+    assert_eq!(
+        urgent,
+        ["Working around it on api now."],
+        "said once across both runs; the finished retry's own act-today line is not owed either: the user was told"
+    );
 }
 
 /// The text of the prompt the run in `dir/work/` was given (the only run there).
@@ -443,7 +453,8 @@ fn a_retry_is_told_what_the_earlier_run_already_did() {
     let config = config_in(&dir, json!({ "command": ["sh", agent] }), &[("GITHUB_TOKEN".to_string(), "ghp_unused".to_string())].into());
     let report = dir.path().join("reports").join("q.md");
     fs::create_dir_all(report.parent().expect("a dir")).expect("makes the reports dir");
-    fs::write(&report, "## Message\nact this week: the lockfile is on 1.0.0, no fix yet; opened the PR, was checking the second repo.\n").expect("writes the earlier report");
+    fs::write(&report, "## Message\nact this week: the lockfile is on 1.0.0, no fix yet; opened the PR, was checking the second repo.\n")
+        .expect("writes the earlier report");
     // The run that ended on a timeout: its triage, its pull request and its report are on record.
     cvecondor::state::write_state(
         dir.path(),
@@ -459,7 +470,8 @@ fn a_retry_is_told_what_the_earlier_run_already_did() {
     let case_file = dir.path().join("q.json");
     fs::write(&case_file, "{}").expect("writes the case");
 
-    start_response_with(&config, &c, &case_file, Mode::Update, recorder().notifier(), &StartOptions { retry: true, ..StartOptions::default() }).expect("starts");
+    start_response_with(&config, &c, &case_file, Mode::Update, recorder().notifier(), &StartOptions { retry: true, ..StartOptions::default() })
+        .expect("starts");
     wait_running();
     let prompt = prompt_of(dir.path());
     for part in [
@@ -515,7 +527,10 @@ fn a_run_reads_each_repos_visibility_from_github_and_tells_the_responder_unknown
     let advisory = "CVE-2026-99999";
     let mut c = case("GHSA-xxxx-yyyy-zzzz", "pending", &dir.path().join("q.md"));
     c.aliases = vec![advisory.to_string()];
-    c.places = ["acme/private-api", "acme/public-site", "acme/gone"].iter().map(|r| cvecondor::watch::Place { host: "github".into(), r#where: format!("repo:{r}") }).collect();
+    c.places = ["acme/private-api", "acme/public-site", "acme/gone"]
+        .iter()
+        .map(|r| cvecondor::watch::Place { host: "github".into(), r#where: format!("repo:{r}") })
+        .collect();
     let case_file = dir.path().join("q.json");
     fs::write(&case_file, "{}").expect("writes the case");
 
@@ -527,7 +542,11 @@ fn a_run_reads_each_repos_visibility_from_github_and_tells_the_responder_unknown
             "public-site" => Some(json!({ "private": false, "visibility": "public" })),
             _ => None,
         };
-        Ok(Response { status: if body.is_some() { 200 } else { 404 }, headers: Vec::new(), body: body.unwrap_or_else(|| json!({ "message": "Not Found" })).to_string().into_bytes() })
+        Ok(Response {
+            status: if body.is_some() { 200 } else { 404 },
+            headers: Vec::new(),
+            body: body.unwrap_or_else(|| json!({ "message": "Not Found" })).to_string().into_bytes(),
+        })
     };
     // Clones go to a path that does not exist, so the run never touches the network for them.
     let mut env = process_env();
@@ -537,11 +556,24 @@ fn a_run_reads_each_repos_visibility_from_github_and_tells_the_responder_unknown
         ("GIT_CONFIG_VALUE_0".to_string(), "https://github.com/".to_string()),
         ("GITHUB_TOKEN".to_string(), "ghp_unused".to_string()),
     ]);
-    start_response_with(&config, &c, &case_file, Mode::Update, recorder().notifier(), &StartOptions { env: Some(&env), fetch: Some(&fetch), ..StartOptions::default() })
-        .expect("starts");
+    start_response_with(
+        &config,
+        &c,
+        &case_file,
+        Mode::Update,
+        recorder().notifier(),
+        &StartOptions { env: Some(&env), fetch: Some(&fetch), ..StartOptions::default() },
+    )
+    .expect("starts");
     wait_running();
     let prompt = prompt_of(dir.path());
-    let section = prompt.split("\n## What you may write into each repo\n").nth(1).expect("the brief has the section").split("\nCase file:").next().expect("it ends before the case file");
+    let section = prompt
+        .split("\n## What you may write into each repo\n")
+        .nth(1)
+        .expect("the brief has the section")
+        .split("\nCase file:")
+        .next()
+        .expect("it ends before the case file");
     assert!(section.contains("- acme/private-api: PRIVATE\n"), "{section}");
     assert!(section.contains("- acme/public-site: PUBLIC\n"), "{section}");
     assert!(section.contains("- acme/gone: PUBLIC (its visibility could not be read: treated as public)"), "{section}");

@@ -429,9 +429,10 @@ pub fn osv_fixes(record: &OsvRecord, items: &[InventoryItem]) -> Vec<String> {
         for range in affected.ranges.as_deref().unwrap_or_default() {
             for event in &range.events {
                 if let Some(fixed) = event.get("fixed").filter(|f| !f.is_empty())
-                    && !fixes.contains(fixed) {
-                        fixes.push(fixed.clone());
-                    }
+                    && !fixes.contains(fixed)
+                {
+                    fixes.push(fixed.clone());
+                }
             }
         }
     }
@@ -726,8 +727,14 @@ pub fn prose_candidates(items: &[ProseItem], inventory: &Inventory, priority: &[
     let mut groups: IndexMap<String, (ProseCandidate, Vec<&InventoryItem>)> = IndexMap::new();
     for item in items {
         let text = format!("{} {}", item.title, item.text).to_ascii_lowercase();
-        let mut hit: Vec<String> =
-            terms.keys().chain(carriers.keys()).filter(|term| mentions_lower(&text, &term.to_ascii_lowercase())).cloned().collect::<IndexSet<_>>().into_iter().collect();
+        let mut hit: Vec<String> = terms
+            .keys()
+            .chain(carriers.keys())
+            .filter(|term| mentions_lower(&text, &term.to_ascii_lowercase()))
+            .cloned()
+            .collect::<IndexSet<_>>()
+            .into_iter()
+            .collect();
         // The Node blog's items name no product: it is Node's own feed.
         if item.source == "node-security-blog" {
             hit = if terms.contains_key("node.js") { vec!["node.js".to_string()] } else { Vec::new() };
@@ -1097,7 +1104,8 @@ mod tests {
             compose: None,
             collector: None,
         };
-        let runtime = target_for(&item("web1", "host", ItemKind::Runtime, None, "node", "20.0.0"), std::slice::from_ref(&service), &["example.com".to_string()]);
+        let runtime =
+            target_for(&item("web1", "host", ItemKind::Runtime, None, "node", "20.0.0"), std::slice::from_ref(&service), &["example.com".to_string()]);
         assert!(runtime.exposed.is_empty());
         assert!(runtime.priority);
         let package = target_for(&item("web1", "host", ItemKind::OsPackage, None, "curl", "8"), &[service], &[]);

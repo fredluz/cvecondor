@@ -1141,7 +1141,6 @@ pub fn build_config(raw: &Value, file: &Path, env: &Env) -> Result<Config> {
         }
     }
 
-
     let mut secrets = interpolator.secrets;
     sort_longest_first(&mut secrets);
     Ok(Config {

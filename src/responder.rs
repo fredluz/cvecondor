@@ -25,7 +25,7 @@ use anyhow::{Result, anyhow, bail};
 use indexmap::{IndexMap, IndexSet};
 use regex::Regex;
 
-use crate::config::{Agent, Config, empty_responder_env, Env, Mode, NotifyEvent, SHIPPED_BRIEF_FILES, process_env, read_brief, redact, shipped_brief};
+use crate::config::{Agent, Config, Env, Mode, NotifyEvent, SHIPPED_BRIEF_FILES, empty_responder_env, process_env, read_brief, redact, shipped_brief};
 use crate::fixes::parse_waits;
 use crate::http::{Fetch, Net};
 use crate::name::{ENV_PREFIX, NAME};
@@ -206,7 +206,9 @@ fn earlier_run(record: &ResponseRecord) -> String {
     if record.error.is_none() && record.triage.is_none() && prs.is_empty() && report.is_none() {
         return String::new();
     }
-    let mut out = String::from("\n## What the earlier run did\n\nThis is a retry. The run before it did the following; continue from there. Do not redo what it finished or re-verify what it established; do only what it left, and mention anything you find contradicts it.\n");
+    let mut out = String::from(
+        "\n## What the earlier run did\n\nThis is a retry. The run before it did the following; continue from there. Do not redo what it finished or re-verify what it established; do only what it left, and mention anything you find contradicts it.\n",
+    );
     if let Some(error) = &record.error {
         out.push_str(&format!("- It ended with: {error}\n"));
     }
@@ -315,7 +317,9 @@ pub fn check_env(config: &Config) -> Result<()> {
 pub fn empty_env_text(names: &[String]) -> String {
     let list = names.iter().map(|n| format!("responder.env.{n}")).collect::<Vec<_>>().join(", ");
     let verb = if names.len() == 1 { "is" } else { "are" };
-    format!("{list} {verb} empty, so the agent would start with no credential for it: put the value in the env file and reference it as \"${{NAME}}\" (a shell expands \"${{NAME}}\" to nothing when it edits the config)")
+    format!(
+        "{list} {verb} empty, so the agent would start with no credential for it: put the value in the env file and reference it as \"${{NAME}}\" (a shell expands \"${{NAME}}\" to nothing when it edits the config)"
+    )
 }
 
 /// What a child's stdout has produced so far; shared with the thread that reads it, so a reader still blocked on a

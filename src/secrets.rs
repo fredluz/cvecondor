@@ -298,8 +298,7 @@ pub struct GitleaksOptions {
 }
 
 // The match is often just the token; the variable it is assigned to sits on the same input line.
-static NAME_AT: LazyLock<Regex> =
-    LazyLock::new(|| js_regex(r#"^\s*-?\s*(?:export\s+)?["']?([A-Za-z_][A-Za-z0-9_.-]{1,80})["']?\s*[:=]"#));
+static NAME_AT: LazyLock<Regex> = LazyLock::new(|| js_regex(r#"^\s*-?\s*(?:export\s+)?["']?([A-Za-z_][A-Za-z0-9_.-]{1,80})["']?\s*[:=]"#));
 
 fn name_at(text: &str) -> Option<String> {
     NAME_AT.captures(text).map(|c| c[1].to_string())

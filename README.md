@@ -269,6 +269,7 @@ A collector per machine (macOS first) lists installed apps and how each updates,
 ```sh
 cargo test                                  # matching, the cycle, collectors, notifiers, responder, and a replay of the Oct 20-22 2026 PHP, Node and eMudhra incidents
 cargo clippy --all-targets -- -D warnings
+cargo fmt --check                           # CI checks this too
 scripts/release.sh                          # static binaries into dist/ (macOS arm64 + Linux x86_64/arm64 musl, no Docker), to copy to a server that can't build
 ```
 

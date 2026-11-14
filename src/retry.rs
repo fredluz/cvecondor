@@ -134,15 +134,18 @@ pub fn is_limit(text: &str) -> bool {
 /// (UTC without one).
 pub fn parse_reset(text: &str, reference: Timestamp) -> Option<Timestamp> {
     static EPOCH: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)limit reached\|(\d{10})\b").expect("valid regex"));
-    static KEYWORD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(?:resets?(?:\s+at)?|(?:try|retry)(?:\s+again)?\s+at|available again at)\s+([^\n]{1,60})").expect("valid regex"));
+    static KEYWORD: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?i)\b(?:resets?(?:\s+at)?|(?:try|retry)(?:\s+again)?\s+at|available again at)\s+([^\n]{1,60})").expect("valid regex"));
     static RELATIVE: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"(?i)\b(?:(?:try|retry)(?:\s+again)?|resets?|available again)\s+(?:in|after)\s+((?:\d+\s*(?:days?|d|hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b[\s,]*(?:and\s+)?)+)")
             .expect("valid regex")
     });
-    static UNIT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)(\d+)\s*(days?|d|hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b").expect("valid regex"));
+    static UNIT: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?i)(\d+)\s*(days?|d|hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b").expect("valid regex"));
     static CLOCK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(\d{1,2})(?::(\d{2}))?\s*([ap])\.?m\b|\b(\d{1,2}):(\d{2})\b").expect("valid regex"));
     static ZONE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\(([A-Za-z][A-Za-z0-9_/+\-]*)\)").expect("valid regex"));
-    static DAY: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})\b").expect("valid regex"));
+    static DAY: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?i)\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})\b").expect("valid regex"));
     static WEEKDAY: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(mon|tue|wed|thu|fri|sat|sun)[a-z]*\b").expect("valid regex"));
 
     if let Some(m) = EPOCH.captures(text) {
@@ -178,7 +181,8 @@ pub fn parse_reset(text: &str, reference: Timestamp) -> Option<Timestamp> {
     let today = zone.to_datetime(reference).date();
     let on = |date: Date| DateTime::from_parts(date, jiff::civil::time(hour, minute, 0, 0)).to_zoned(zone.clone()).ok().map(|z| z.timestamp());
     if let Some(d) = DAY.captures(rest) {
-        let month = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"].iter().position(|m| d[1].eq_ignore_ascii_case(m))? as i8 + 1;
+        let month =
+            ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"].iter().position(|m| d[1].eq_ignore_ascii_case(m))? as i8 + 1;
         let day: i8 = d[2].parse().ok()?;
         let this_year = on(Date::new(today.year(), month, day).ok()?)?;
         return if this_year >= reference { Some(this_year) } else { on(Date::new(today.year() + 1, month, day).ok()?) };
@@ -279,7 +283,8 @@ impl Queue {
             .find(|e| {
                 !is_case_level(&e.reason)
                     && !self.told_causes.contains(&cause_of(&e.reason))
-                    && ((!e.limit && e.streak >= STUCK_AFTER) || (e.limit && parse_time(&e.next_at).is_some_and(|t| t.as_millisecond() - now.as_millisecond() > LIMIT_LONG_MS)))
+                    && ((!e.limit && e.streak >= STUCK_AFTER)
+                        || (e.limit && parse_time(&e.next_at).is_some_and(|t| t.as_millisecond() - now.as_millisecond() > LIMIT_LONG_MS)))
             })
             .cloned()?;
         self.told_causes.push(cause_of(&entry.reason));
@@ -298,8 +303,9 @@ impl Queue {
 /// Why a run did not finish, in one line: how it ended and the agent's own words about it (its limit message, "not
 /// logged in", the shell's "command not found"), which the queue reads the reset time from.
 pub fn failure_reason(how: &str, stdout: &str, stderr: &str) -> String {
-    static WORDS: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"(?i)login|log in|logged|auth|credential|token|api key|expired|unauthori[sz]ed|forbidden|denied|not found|error|fail").expect("valid regex"));
+    static WORDS: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?i)login|log in|logged|auth|credential|token|api key|expired|unauthori[sz]ed|forbidden|denied|not found|error|fail").expect("valid regex")
+    });
     // A long stdout is a report, not an error message (and may talk about rate limits for a living).
     let stdout = if stdout.len() > 1000 { "" } else { stdout };
     let lines: Vec<&str> = stdout.lines().chain(stderr.lines()).map(str::trim).filter(|l| !l.is_empty()).collect();

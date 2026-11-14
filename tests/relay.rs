@@ -307,7 +307,11 @@ fn a_message_the_agent_could_not_answer_is_kept_told_once_and_answered_late_afte
     let handled = poll_once(&config, notifier(&config), &fetch, &agent, &at("2026-10-22T19:45:00Z"), &options).expect("polls");
     assert_eq!(handled, 1);
     let sent = telegram.sent();
-    assert_eq!((sent.len(), sent[1]["text"].as_str(), sent[1]["reply_to_message_id"].as_i64()), (2, Some("merged"), Some(7)), "the late answer points at the original message");
+    assert_eq!(
+        (sent.len(), sent[1]["text"].as_str(), sent[1]["reply_to_message_id"].as_i64()),
+        (2, Some("merged"), Some(7)),
+        "the late answer points at the original message"
+    );
     let calls = calls.lock().unwrap_or_else(PoisonError::into_inner);
     assert!(calls[1].prompt.contains("Answered late") && calls[1].prompt.contains("yes, merge it") && !calls[0].prompt.contains("Answered late"));
     let again = poll_once(&config, notifier(&config), &fetch, &agent, &at("2026-10-22T23:00:00Z"), &options).expect("polls");
@@ -365,10 +369,10 @@ fn every_chat_that_wrote_is_remembered_by_name_even_when_skipped_and_never_its_t
     poll_once(&config, notifier(&config), &fetch, &agent, &|| now(), &options).expect("polls");
 
     let chats = seen_chats(dir.path(), TOKEN);
-    assert_eq!(chats.iter().map(|c| (c.id, c.describe())).collect::<Vec<_>>(), [
-        (123456789, "private: Ana Silva @ana".to_string()),
-        (-100777, "supergroup: \"Ops\"".to_string())
-    ]);
+    assert_eq!(
+        chats.iter().map(|c| (c.id, c.describe())).collect::<Vec<_>>(),
+        [(123456789, "private: Ana Silva @ana".to_string()), (-100777, "supergroup: \"Ops\"".to_string())]
+    );
     for entry in std::fs::read_dir(dir.path()).expect("lists the state dir") {
         let content = std::fs::read_to_string(entry.expect("an entry").path()).unwrap_or_default();
         assert!(!content.contains("never-keep-this"), "a written text must not be kept");

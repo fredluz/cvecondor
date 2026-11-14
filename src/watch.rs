@@ -919,7 +919,10 @@ pub fn assess(input: &AssessInput) -> Assessment {
         return rated(Rating::ActToday, format!("malicious package: assume whatever installed or ran it is compromised{stake}"));
     }
     if !affected.is_empty() && affected.iter().all(|a| a.running == Some(false)) {
-        return rated(Rating::NotARealRisk, "its service is not running; nothing carries it to a live attacker, it matters again once the service is back".into());
+        return rated(
+            Rating::NotARealRisk,
+            "its service is not running; nothing carries it to a live attacker, it matters again once the service is back".into(),
+        );
     }
     if !affected.is_empty() && affected.iter().all(|a| a.dev == Some(true)) {
         let rating = if input.severity == Severity::Critical { Rating::PlanIt } else { Rating::NotARealRisk };
@@ -1090,7 +1093,8 @@ fn reopen(c: &mut Case, summary: &mut CycleSummary, at: &str, reason: String) {
 /// coming back (a triage that closed it is not applied twice): it watches.
 fn settle_back(c: &mut Case, at: &str, why: &str) {
     let (status, reason, detail) = outcome(c);
-    let (status, reason, detail) = if status == CaseStatus::Closed { (CaseStatus::Waiting, StatusReason::Watching, why.to_string()) } else { (status, reason, detail) };
+    let (status, reason, detail) =
+        if status == CaseStatus::Closed { (CaseStatus::Waiting, StatusReason::Watching, why.to_string()) } else { (status, reason, detail) };
     c.updated_at = at.to_string();
     settle(c, status, Some(reason), detail, at);
 }
@@ -1131,7 +1135,13 @@ fn case_service(c: &Case, states: &IndexMap<String, crate::service::Resolution>)
             all_down &= state.is_down();
         }
     }
-    if seen && all_down { Some(ServiceState::Down) } else if all_down { None } else { Some(ServiceState::Running) }
+    if seen && all_down {
+        Some(ServiceState::Down)
+    } else if all_down {
+        None
+    } else {
+        Some(ServiceState::Running)
+    }
 }
 
 /// Re-reads each case's service and keeps `waiting: service` current: a down service waits on the service
@@ -1180,7 +1190,6 @@ pub fn service_phase(config: &Config, inventory: &Inventory, cases: &mut IndexMa
         }
     }
 }
-
 
 /// Adds a cycle error (redacted, cut to 300 characters).
 fn record_error(config: &Config, summary: &mut CycleSummary, place: &str, e: &dyn Display) {
@@ -1458,13 +1467,18 @@ impl Cycle<'_, '_> {
                 let reaches_new_place = existing.is_some_and(|c| {
                     c.kind == CaseKind::Vulnerability
                         && c.state == CaseState::Handled
-                        && !c.unjudged_places(&hit.items.iter().map(|i| Place { host: i.host.clone(), r#where: i.r#where.clone() }).collect::<Vec<_>>()).is_empty()
+                        && !c
+                            .unjudged_places(&hit.items.iter().map(|i| Place { host: i.host.clone(), r#where: i.r#where.clone() }).collect::<Vec<_>>())
+                            .is_empty()
                 });
                 if prior.as_deref() == Some(hit.modified.as_str()) && !reaches_new_place {
                     continue;
                 }
                 // A known match is re-read only when it changed and could now need action (a fix, exploitation), or reaches a new place.
-                if prior.is_some() && !reaches_new_place && !existing.is_some_and(|c| c.state == CaseState::Watch || (c.state == CaseState::Handled && !c.fix_available)) {
+                if prior.is_some()
+                    && !reaches_new_place
+                    && !existing.is_some_and(|c| c.state == CaseState::Watch || (c.state == CaseState::Handled && !c.fix_available))
+                {
                     continue;
                 }
                 work.push(Work { hit: hit.clone(), family: family.clone(), baseline });
@@ -2681,7 +2695,8 @@ fn related_cases(cases: &IndexMap<String, Case>, c: &Case, inventory: &Inventory
         .filter(|other| other.key != c.key)
         .filter_map(|other| {
             let story = other.handled_at.as_deref().and_then(parse_time).is_some_and(|handled| handled.as_millisecond() > week_ago)
-                && (other.terms.iter().flatten().any(|term| c.terms.iter().flatten().any(|t| t == term)) || other.aliases.iter().any(|alias| c.aliases.contains(alias)));
+                && (other.terms.iter().flatten().any(|term| c.terms.iter().flatten().any(|t| t == term))
+                    || other.aliases.iter().any(|alias| c.aliases.contains(alias)));
             let package = same_package(other);
             (story || package).then_some((other, package))
         })

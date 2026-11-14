@@ -308,8 +308,7 @@ fn command_input(notice: &Notice) -> &str {
 
 fn run_command(argv: &[String], notice: &Notice) -> Result<()> {
     // `vars_os`: a variable that isn't valid Unicode is passed through lossily instead of panicking the cycle.
-    let mut env: Vec<(String, String)> =
-        std::env::vars_os().map(|(k, v)| (k.to_string_lossy().into_owned(), v.to_string_lossy().into_owned())).collect();
+    let mut env: Vec<(String, String)> = std::env::vars_os().map(|(k, v)| (k.to_string_lossy().into_owned(), v.to_string_lossy().into_owned())).collect();
     env.extend([
         ("NOTICE_EVENT".to_string(), notice.event.as_str().to_string()),
         ("NOTICE_TITLE".to_string(), notice.title.clone()),

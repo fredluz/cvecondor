@@ -263,13 +263,6 @@ fn status_lists_each_notifier_by_number_with_its_events_and_never_a_secret() {
         { "type": "slack", "events": ["urgent", "case"], "webhookUrl": "https://hooks.slack.com/services/T0/B0/xyzSECRET" }
     ] }));
     let lines = notifier_lines(&config, now());
-    assert_eq!(
-        lines,
-        [
-            "Notifiers:",
-            "  1. telegram (urgent) to chat 42; replies off (urgent lines only go out)",
-            "  2. slack (urgent, case)"
-        ]
-    );
+    assert_eq!(lines, ["Notifiers:", "  1. telegram (urgent) to chat 42; replies off (urgent lines only go out)", "  2. slack (urgent, case)"]);
     assert_eq!(notifier_lines(&test_config(json!({})), now()), ["Notifiers: none (log only)"]);
 }
