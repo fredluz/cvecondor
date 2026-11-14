@@ -88,6 +88,9 @@
     "notes": "Staging is app-staging.example.com. Never touch the billing database. Act on web1 with `ssh web1-act`; privileged commands as `sudo -n` (agent/setup.md, \"Acting on the server\").",
     "maxPerCycle": 2,
     "timeoutMinutes": 60,
+    // How a run's stdout is read for token usage (counted in usage.jsonl, totalled by `status`): "claude-json" | "codex-jsonl" | "none".
+    // The presets set it; a custom "command" is "none" (usage unknown) unless its output is one of those two forms.
+    // "usage": "none",
     // The responder's environment never inherits the watcher's secrets; pass what it needs to act, by name.
     // One token for both (simplest): a fine-grained token with Contents and Pull requests write, which the
     // watcher only reads with and the responder uses as its gh/git login. For stricter separation, give the

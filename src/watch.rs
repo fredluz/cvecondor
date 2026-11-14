@@ -457,6 +457,9 @@ pub struct ResponseRecord {
     /// The urgent lines this case's runs sent, so a retry does not send them again.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub urgent: Vec<String>,
+    /// What the agent used in the run that ended it (absent while it runs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<crate::usage::Usage>,
 }
 
 /// Judges one prose candidate (the classifier, or a stand-in).

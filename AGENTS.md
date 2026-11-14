@@ -79,7 +79,8 @@ The split you work within:
 | `reports/<date>-<key>.md` | Each case's report: the responder's, or the notice. |
 | `reports/<date>-batch-<time>.md`, `batches.json` | Each batch (the cases one cycle found) in full; which batches were summarised and had their results reported. |
 | `reports/<date>-<time>-<event>.md`, `inbox.jsonl`, `inbox-read.json` | Every notice, kept as a file (`urgent`, `case` = a batch summary, `report` = results, `secrets`); the inbox lists them; `inbox-read.json` marks how far you have read. |
-| `responses/<key>.json` | Each response's state, exit, report, declared waits and fixed releases. |
+| `responses/<key>.json` | Each response's state, exit, report, declared waits and fixed releases, and the agent's token usage of its last run. |
+| `usage.jsonl` | One line per agent run of the responder and the relay: time, component, case key, CLI, mode, models and token counts (counts only; a number the CLI did not report is absent, never 0; cost is the CLI's own estimate). Lines older than 90 days are dropped when one is added. `status` totals the last 7 days. Not counted: `follow`, omp, classifier.dev. |
 | `retries.json`, `relay-retries.json` | The retry queue: each case whose response did not finish (reason, attempts, when it runs again, whether the agent is out of quota), and Telegram messages the agent could not answer yet. |
 | `work/<key>-<time>/` | A response's scratch: `prompt.md`, `outbox/` (the messages it sent), `report.md`. |
 | `inventory.json` | What the collectors saw: items, services, secrets (names and fingerprints), vendor signals, and per-collector status under `sources`. |

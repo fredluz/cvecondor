@@ -385,6 +385,7 @@ fn record_report(config: &Config, key: Option<&str>, file: Option<&str>) -> Resu
             error: None,
             pid: None,
             urgent: Vec::new(),
+            usage: None,
         };
         write_state(dir, &format!("responses/{}.json", slug(&key)), &record)?;
         // The merge sets `report`, `handledAt` and the waits from the record.
@@ -672,6 +673,9 @@ fn status(config: &Config, show_closed: bool) -> Result<String> {
         let paused =
             queue.paused_until.as_deref().filter(|_| queue.paused(util::now())).map(|t| format!("; the agent is out of quota until {t}")).unwrap_or_default();
         lines.push(format!("Retry queue: {} case(s) waiting for another responder run, the next not before {next}{paused}", queue.entries.len()));
+    }
+    if let Some(line) = crate::usage::status_line(dir, util::now()) {
+        lines.push(line);
     }
     let (open, waiting, closed) = (by_status(CaseStatus::Open), by_status(CaseStatus::Waiting), by_status(CaseStatus::Closed));
     lines.push(format!(

@@ -34,6 +34,7 @@ use crate::notify::Notice;
 use crate::responder::{responder_command, responder_env};
 use crate::retry::{self, Queue};
 use crate::state::{read_state, with_lock, write_file_atomic, write_state};
+use crate::usage;
 use crate::util::{self, RunOptions, iso, sha256_hex};
 
 /// The rules the agent in charge works under; the start of every prompt.
@@ -85,6 +86,11 @@ pub struct RelayJob {
     pub env: Vec<(String, String)>,
     pub cwd: PathBuf,
     pub timeout: Duration,
+    /// How its stdout is read for the agent's token usage (`responder.usage`).
+    pub usage: crate::usage::Format,
+    /// Where its usage is recorded and under what CLI name.
+    pub state_dir: PathBuf,
+    pub cli: String,
 }
 
 /// How a poll runs; `Default` is the daemon's (long poll, the real environment, `util::log`).
@@ -468,6 +474,9 @@ fn build_job(config: &Config, token: &str, incoming: &Incoming, at: &str, base: 
         argv,
         env,
         timeout: AGENT_TIMEOUT,
+        usage: r.usage,
+        state_dir: config.state_dir.clone(),
+        cli: crate::responder::cli_label(r),
     })
 }
 
@@ -485,14 +494,17 @@ pub fn run_job(job: &RelayJob) -> Result<String> {
             ..RunOptions::default()
         },
     )?;
+    // The answer text it was before usage was read out of its stdout.
+    let unwrapped = usage::unwrap(job.usage, &String::from_utf8_lossy(&out.stdout), &job.workdir);
+    usage::note(&job.state_dir, usage::Component::Relay, None, &job.cli, Mode::Act.as_str(), unwrapped.usage);
+    let stdout = unwrapped.text;
     if let Ok(reply) = fs::read_to_string(job.workdir.join("reply.md"))
         && !reply.trim().is_empty()
     {
         return Ok(reply);
     }
-    let stdout = String::from_utf8_lossy(&out.stdout);
     if out.code == Some(0) && !out.timed_out && !stdout.trim().is_empty() {
-        return Ok(stdout.into_owned());
+        return Ok(stdout);
     }
     // Not an answer: its limit message, an error, a timeout. The caller queues the message for another try.
     let how = match (out.timed_out, out.code) {
