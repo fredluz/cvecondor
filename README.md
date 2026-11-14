@@ -103,6 +103,7 @@ inventory [--out F] refresh the inventory now (read-only)
 baseline [--out F]  critical/high per place today, secrets where they shouldn't be, vendors watched
 status [--closed]     last cycle, sources, collectors, notifiers (and whether Telegram replies are being read),
                       cases: open and waiting (with what each waits on); --closed also lists closed ones
+dashboard [--out F] status, cases, inventory, secrets (names and fingerprints), inbox and reports as one static HTML page; read-only
 vendors             the vendors detected (and named in the config); --catalog [TERM] lists catalogue ids
 secrets             secret findings: names, places, fingerprints
 notify-test [TYPE|N]  a test line through every notifier, or only one (its type, or its number in `status`)
@@ -120,6 +121,15 @@ record KEY --file REPORT
 close KEY [--note T]  close a case you want nothing more about (dismissed; it never reopens on its own)
 follow [--once | --test] [--config FILE]
                     on your own machine: each urgent line from the watcher opens a session of your agent
+```
+
+## Dashboard: the state as one page
+
+`cvecondor dashboard` reads the state dir and prints one self-contained HTML page: health (last cycle, failing sources and collectors, notifiers, retry queue), open and waiting cases with their rating and what each waits for, the inventory, secrets by name, place and fingerprint, the inbox and the list of reports. It is read-only: nothing listens and nothing is fetched, it never marks the inbox read, and the page has no script and loads nothing from outside. Strings from the state are escaped, and only http(s) advisory URLs become links. Judgment and every change stay with your agent. A headless watcher is reached the way every command is, with no new port open:
+
+```
+ssh web1 docker exec cvecondor cvecondor dashboard > cvecondor.html
+cvecondor dashboard --out cvecondor.html     # on the watcher itself; the file is mode 0600
 ```
 
 ## Follow: urgent lines in your agent's own session
