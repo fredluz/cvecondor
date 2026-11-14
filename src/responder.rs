@@ -514,13 +514,7 @@ fn run_child(spec: &ChildSpec, on_spawn: impl FnOnce(Option<u32>)) -> Ran {
     // The child is gone; what it left in its group (an agent's subprocesses) gets the rest of its grace after the
     // SIGTERM, then SIGKILL, so nothing outlives a run that was cut off.
     if let Some(since) = idle_ended_at.or(terminated_at) {
-        while util::group_alive(pid) {
-            if Instant::now().duration_since(since) >= KILL_AFTER {
-                util::kill_group(pid, libc::SIGKILL);
-                break;
-            }
-            thread::sleep(Duration::from_millis(20));
-        }
+        util::finish_group(pid, since);
     }
     // Normally the pipe closes with the child. An idle-ended child's own children may hold it open: take what was read.
     if idle_ended {

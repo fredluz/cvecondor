@@ -393,6 +393,25 @@ pub fn own_process_group(cmd: &mut Command) {
 /// How long a group gets between SIGTERM and SIGKILL.
 pub const TERM_GRACE: Duration = Duration::from_secs(10);
 
+/// Once the group's leader has been reaped after a SIGTERM sent at `termed_at`: waits for the rest of the group to
+/// go, signalling it again once and sending SIGKILL when `TERM_GRACE` has passed. The second SIGTERM is not a
+/// courtesy: a process forked while the first one went out can be missed by a group signal (seen on macOS), and
+/// would otherwise sit out the whole grace holding the pipes open.
+pub fn finish_group(pid: u32, termed_at: Instant) {
+    let mut resent = false;
+    while group_alive(pid) {
+        if Instant::now() >= termed_at + TERM_GRACE {
+            kill_group(pid, libc::SIGKILL);
+            break;
+        }
+        if !resent {
+            kill_group(pid, libc::SIGTERM);
+            resent = true;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
 /// Runs `argv` to completion in its own process group. A program that cannot be started is an `Err` (`SpawnError`);
 /// a non-zero exit or a timeout is an `Ok` the caller inspects. On timeout or when output passes `max_output` the
 /// group gets SIGTERM, then SIGKILL after `TERM_GRACE`; no process of the group is left once `run` returns after that.
@@ -459,13 +478,7 @@ pub fn run(argv: &[String], opts: &RunOptions) -> Result<RunOutput> {
         };
         // The leader is gone; what it left behind in the group (it holds the pipes open) still gets its grace.
         if let Some(t) = terminated_at {
-            while group_alive(pid) {
-                if Instant::now() >= t + TERM_GRACE {
-                    kill_group(pid, libc::SIGKILL);
-                    break;
-                }
-                thread::sleep(Duration::from_millis(10));
-            }
+            finish_group(pid, t);
         }
         let out = out.map_or(Ok((Vec::new(), false)), |h| h.join().map_err(|_| anyhow!("reading stdout panicked")))?;
         let err = err.map_or(Ok((Vec::new(), false)), |h| h.join().map_err(|_| anyhow!("reading stderr panicked")))?;
@@ -649,6 +662,22 @@ mod tests {
         assert!(out.truncated);
         assert_eq!(out.stdout.len(), 1000);
         assert!(started.elapsed() < Duration::from_secs(8), "the child kept running for {:?}", started.elapsed());
+    }
+
+    #[test]
+    fn finish_group_stops_a_straggler_the_first_sigterm_missed() {
+        // The leader exits at once and leaves `sleep` in its group, as if the group signal had missed it.
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "sleep 30 & exit 0"]);
+        own_process_group(&mut cmd);
+        let mut child = cmd.spawn().expect("sh starts");
+        let pid = child.id();
+        child.wait().expect("the leader is reaped");
+        assert!(group_alive(pid), "the straggler is in the group");
+        let started = Instant::now();
+        finish_group(pid, started);
+        assert!(started.elapsed() < Duration::from_secs(5), "left to the SIGKILL after {:?}", started.elapsed());
+        assert!(!group_alive(pid));
     }
 
     #[test]
